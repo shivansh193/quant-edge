@@ -1,0 +1,76 @@
+{
+  "as_of": "2024-12-31",
+  "macro": {
+    "on": true,
+    "vix": null,
+    "yield_10y": null
+  },
+  "picks": [
+    {
+      "composite": 63.07009950878991,
+      "correlation_warning": null,
+      "fundamental_raw": 0.12005503056273091,
+      "industry": "IT Services",
+      "insider_raw": 0.0,
+      "macro_on": true,
+      "momentum_raw": 0.5001323429816935,
+      "pairs_raw": 0.0,
+      "rank": 1,
+      "sentiment_raw": 0.0,
+      "ticker": "WIPRO.NS"
+    },
+    {
+      "composite": 61.90978664487463,
+      "correlation_warning": null,
+      "fundamental_raw": -0.007027017728995451,
+      "industry": "IT Services",
+      "insider_raw": 0.0,
+      "macro_on": true,
+      "momentum_raw": 0.4918890588541604,
+      "pairs_raw": 0.0,
+      "rank": 2,
+      "sentiment_raw": 0.0,
+      "ticker": "HCLTECH.NS"
+    },
+    {
+      "composite": 61.1942983931709,
+      "correlation_warning": null,
+      "fundamental_raw": -0.149642318991128,
+      "industry": "IT Services",
+      "insider_raw": 0.0,
+      "macro_on": true,
+      "momentum_raw": 0.5067600702630293,
+      "pairs_raw": 0.0,
+      "rank": 3,
+      "sentiment_raw": 0.0,
+      "ticker": "TECHM.NS"
+    },
+    {
+      "composite": 57.81760684739148,
+      "correlation_warning": null,
+      "fundamental_raw": 0.07596959118508785,
+      "industry": "IT Services",
+      "insider_raw": 0.0,
+      "macro_on": true,
+      "momentum_raw": 0.29785141472346066,
+      "pairs_raw": 0.0,
+      "rank": 4,
+      "sentiment_raw": 0.0,
+      "ticker": "INFY.NS"
+    },
+    {
+      "composite": 51.28523722759832,
+      "correlation_warning": null,
+      "fundamental_raw": 0.07731138163897139,
+      "industry": "IT Services",
+      "insider_raw": 0.0,
+      "macro_on": true,
+      "momentum_raw": 0.028836654439455628,
+      "pairs_raw": 0.0,
+      "rank": 5,
+      "sentiment_raw": 0.0,
+      "ticker": "TCS.NS"
+    }
+  ],
+  "universe_size": 5
+}

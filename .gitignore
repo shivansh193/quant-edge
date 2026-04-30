@@ -1,0 +1,28 @@
+# Build artifacts
+/target/
+
+# Environment & secrets
+.env
+!.env.example
+
+# Cache & databases
+/cache/
+*.db
+*.sqlite
+*.sqlite3
+
+# Logs
+/logs/
+
+# Editor & OS
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Profiling
+*.prof
+flamegraph.svg
+perf.data

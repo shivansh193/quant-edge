@@ -1,0 +1,47 @@
+[package]
+name = "portfolio-sim"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "portfolio-sim"
+path = "src/main.rs"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+
+rand = { version = "0.8", features = ["std_rng"] }
+csv  = "1"
+# HTTP
+reqwest = { version = "0.12", features = ["json", "cookies"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Date/time
+chrono = { version = "0.4", features = ["serde"] }
+
+# SQLite cache
+rusqlite = { version = "0.31", features = ["bundled"] }
+
+# Async traits
+async-trait = "0.1"
+
+# Error handling
+anyhow = "1"
+
+# .env file loading
+dotenvy = "0.15"
+
+# CLI arg parsing (used in main.rs)
+clap = { version = "=4.5.37", features = ["derive"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Matrix operations for correlation engine
+ndarray = "0.15"

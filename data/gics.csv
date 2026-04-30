@@ -1,0 +1,76 @@
+sector_code,sector_name,industry_group_code,industry_group_name,industry_code,industry_name
+10,Energy,1010,Energy,101010,Energy Equipment & Services
+10,Energy,1010,Energy,101020,Oil Gas & Consumable Fuels
+15,Materials,1510,Materials,151010,Chemicals
+15,Materials,1510,Materials,151020,Construction Materials
+15,Materials,1510,Materials,151030,Containers & Packaging
+15,Materials,1510,Materials,151040,Metals & Mining
+15,Materials,1510,Materials,151050,Paper & Forest Products
+20,Industrials,2010,Capital Goods,201010,Aerospace & Defense
+20,Industrials,2010,Capital Goods,201020,Building Products
+20,Industrials,2010,Capital Goods,201030,Construction & Engineering
+20,Industrials,2010,Capital Goods,201040,Electrical Equipment
+20,Industrials,2010,Capital Goods,201050,Industrial Conglomerates
+20,Industrials,2010,Capital Goods,201060,Machinery
+20,Industrials,2010,Capital Goods,201070,Trading Companies & Distributors
+20,Industrials,2020,Commercial & Professional Services,202010,Commercial Services & Supplies
+20,Industrials,2020,Commercial & Professional Services,202020,Professional Services
+20,Industrials,2030,Transportation,203010,Air Freight & Logistics
+20,Industrials,2030,Transportation,203020,Passenger Airlines
+20,Industrials,2030,Transportation,203030,Marine Transportation
+20,Industrials,2030,Transportation,203040,Ground Transportation
+20,Industrials,2030,Transportation,203050,Transportation Infrastructure
+25,Consumer Discretionary,2510,Automobiles & Components,251010,Automobile Components
+25,Consumer Discretionary,2510,Automobiles & Components,251020,Automobiles
+25,Consumer Discretionary,2520,Consumer Durables & Apparel,252010,Household Durables
+25,Consumer Discretionary,2520,Consumer Durables & Apparel,252020,Leisure Products
+25,Consumer Discretionary,2520,Consumer Durables & Apparel,252030,Textiles Apparel & Luxury Goods
+25,Consumer Discretionary,2530,Consumer Services,253010,Hotels Restaurants & Leisure
+25,Consumer Discretionary,2530,Consumer Services,253020,Diversified Consumer Services
+25,Consumer Discretionary,2550,Consumer Discretionary Distribution & Retail,255010,Distributors
+25,Consumer Discretionary,2550,Consumer Discretionary Distribution & Retail,255020,Broadline Retail
+25,Consumer Discretionary,2550,Consumer Discretionary Distribution & Retail,255030,Specialty Retail
+30,Consumer Staples,3010,Consumer Staples Distribution & Retail,301010,Consumer Staples Distribution & Retail
+30,Consumer Staples,3020,Food Beverage & Tobacco,302010,Beverages
+30,Consumer Staples,3020,Food Beverage & Tobacco,302020,Food Products
+30,Consumer Staples,3020,Food Beverage & Tobacco,302030,Tobacco
+30,Consumer Staples,3030,Household & Personal Products,303010,Household Products
+30,Consumer Staples,3030,Household & Personal Products,303020,Personal Care Products
+35,Health Care,3510,Health Care Equipment & Services,351010,Health Care Equipment & Supplies
+35,Health Care,3510,Health Care Equipment & Services,351020,Health Care Providers & Services
+35,Health Care,3510,Health Care Equipment & Services,351030,Health Care Technology
+35,Health Care,3520,Pharmaceuticals Biotechnology & Life Sciences,352010,Biotechnology
+35,Health Care,3520,Pharmaceuticals Biotechnology & Life Sciences,352020,Pharmaceuticals
+35,Health Care,3520,Pharmaceuticals Biotechnology & Life Sciences,352030,Life Sciences Tools & Services
+40,Financials,4010,Banks,401010,Banks
+40,Financials,4010,Banks,401020,Thrifts & Mortgage Finance
+40,Financials,4020,Financial Services,402010,Diversified Financial Services
+40,Financials,4020,Financial Services,402020,Consumer Finance
+40,Financials,4020,Financial Services,402030,Capital Markets
+40,Financials,4020,Financial Services,402040,Mortgage Real Estate Investment Trusts
+40,Financials,4030,Insurance,403010,Insurance
+45,Information Technology,4510,Software & Services,451010,IT Services
+45,Information Technology,4510,Software & Services,451020,Software
+45,Information Technology,4520,Technology Hardware & Equipment,452010,Communications Equipment
+45,Information Technology,4520,Technology Hardware & Equipment,452020,Technology Hardware Storage & Peripherals
+45,Information Technology,4520,Technology Hardware & Equipment,452030,Electronic Equipment Instruments & Components
+45,Information Technology,4530,Semiconductors & Semiconductor Equipment,453010,Semiconductors & Semiconductor Equipment
+50,Communication Services,5010,Telecommunication Services,501010,Diversified Telecommunication Services
+50,Communication Services,5010,Telecommunication Services,501020,Wireless Telecommunication Services
+50,Communication Services,5020,Media & Entertainment,502010,Media
+50,Communication Services,5020,Media & Entertainment,502020,Entertainment
+50,Communication Services,5020,Media & Entertainment,502030,Interactive Media & Services
+55,Utilities,5510,Utilities,551010,Electric Utilities
+55,Utilities,5510,Utilities,551020,Gas Utilities
+55,Utilities,5510,Utilities,551030,Multi-Utilities
+55,Utilities,5510,Utilities,551040,Water Utilities
+55,Utilities,5510,Utilities,551050,Independent Power and Renewable Electricity Producers
+60,Real Estate,6010,Equity Real Estate Investment Trusts,601010,Diversified REITs
+60,Real Estate,6010,Equity Real Estate Investment Trusts,601020,Industrial REITs
+60,Real Estate,6010,Equity Real Estate Investment Trusts,601030,Hotel & Resort REITs
+60,Real Estate,6010,Equity Real Estate Investment Trusts,601040,Office REITs
+60,Real Estate,6010,Equity Real Estate Investment Trusts,601050,Health Care REITs
+60,Real Estate,6010,Equity Real Estate Investment Trusts,601060,Residential REITs
+60,Real Estate,6010,Equity Real Estate Investment Trusts,601070,Retail REITs
+60,Real Estate,6010,Equity Real Estate Investment Trusts,601080,Specialized REITs
+60,Real Estate,6020,Real Estate Management & Development,602010,Real Estate Management & Development
