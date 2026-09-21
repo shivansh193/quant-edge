@@ -1,11 +1,8 @@
-use anyhow::Result;
 use chrono::NaiveDate;
 use rand::prelude::*;
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use tracing::info;
-use rand::prelude::*;
 use rand::rngs::StdRng;
+use serde::{Deserialize, Serialize};
+use tracing::{info, warn};
 
 use crate::portfolio::engine::{PortfolioSnapshot, SimulationResult};
 
@@ -39,7 +36,7 @@ pub struct MetricsReport {
     pub annualised_alpha:   f64,
 
     // Risk metrics
-    pub sharpe_ratio:       f64,    // annualised, risk-free = 0
+    pub sharpe_ratio:       f64,    // annualised, daily excess returns over risk_free_annual
     pub sortino_ratio:      f64,    // downside deviation only
     pub max_drawdown:       f64,    // worst peak-to-trough
     pub volatility:         f64,    // annualised daily return std dev
@@ -58,7 +55,26 @@ pub struct MetricsReport {
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
+#[derive(Debug, Clone)]
+pub struct MetricsOptions {
+    pub run_monte_carlo:  bool,
+    /// Annual risk-free rate for Sharpe/Sortino (0.0 = raw return / risk).
+    pub risk_free_annual: f64,
+    pub mc_simulations:   usize,
+    pub mc_seed:          u64,
+}
+
+impl Default for MetricsOptions {
+    fn default() -> Self {
+        Self { run_monte_carlo: false, risk_free_annual: 0.0, mc_simulations: 5_000, mc_seed: 42 }
+    }
+}
+
 pub fn compute_metrics(result: &SimulationResult, run_monte_carlo: bool) -> MetricsReport {
+    compute_metrics_with(result, &MetricsOptions { run_monte_carlo, ..Default::default() })
+}
+
+pub fn compute_metrics_with(result: &SimulationResult, opts: &MetricsOptions) -> MetricsReport {
     let snapshots  = &result.snapshots;
     let total_days = snapshots.len();
 
@@ -72,8 +88,7 @@ pub fn compute_metrics(result: &SimulationResult, run_monte_carlo: bool) -> Metr
 
     // ── Daily returns ─────────────────────────────────────────────────────────
 
-    let portfolio_returns  = daily_returns_from_snapshots(snapshots, false);
-    let benchmark_returns  = daily_returns_from_snapshots(snapshots, true);
+    let portfolio_returns = daily_returns_from_snapshots(snapshots, false);
 
     // ── Annualisation factor ──────────────────────────────────────────────────
 
@@ -91,11 +106,10 @@ pub fn compute_metrics(result: &SimulationResult, run_monte_carlo: bool) -> Metr
 
     // ── Risk metrics ──────────────────────────────────────────────────────────
 
-    let volatility    = std_dev(&portfolio_returns) * 252_f64.sqrt();
-    let sharpe_ratio  = if volatility > 0.0 { annualised_return / volatility } else { 0.0 };
-
-    let downside_dev  = downside_deviation(&portfolio_returns, 0.0) * 252_f64.sqrt();
-    let sortino_ratio = if downside_dev > 0.0 { annualised_return / downside_dev } else { 0.0 };
+    let rf_daily = (1.0 + opts.risk_free_annual).powf(1.0 / 252.0) - 1.0;
+    let volatility = std_dev(&portfolio_returns) * 252_f64.sqrt();
+    let sharpe_ratio = sharpe(&portfolio_returns, rf_daily);
+    let sortino_ratio = sortino(&portfolio_returns, rf_daily);
 
     let (max_drawdown, drawdown_periods) = compute_drawdowns(snapshots);
     let calmar_ratio = if max_drawdown.abs() > 0.0 {
@@ -106,12 +120,8 @@ pub fn compute_metrics(result: &SimulationResult, run_monte_carlo: bool) -> Metr
 
     // ── Monte Carlo baseline ──────────────────────────────────────────────────
 
-    let monte_carlo = if run_monte_carlo {
-        Some(monte_carlo_baseline(
-            result,
-            5_000,   // number of random portfolios
-            42,      // rng seed for reproducibility
-        ))
+    let monte_carlo = if opts.run_monte_carlo {
+        Some(monte_carlo_baseline(result, opts.mc_simulations, opts.mc_seed))
     } else {
         None
     };
@@ -142,87 +152,103 @@ pub fn compute_metrics(result: &SimulationResult, run_monte_carlo: bool) -> Metr
     }
 }
 
+/// Annualised Sharpe: mean daily excess return / its std dev, × √252.
+fn sharpe(returns: &[f64], rf_daily: f64) -> f64 {
+    let excess: Vec<f64> = returns.iter().map(|r| r - rf_daily).collect();
+    let sd = std_dev(&excess);
+    if sd < 1e-12 { 0.0 } else { mean(&excess) / sd * 252_f64.sqrt() }
+}
+
+/// Annualised Sortino: mean daily excess return / downside deviation, × √252.
+fn sortino(returns: &[f64], rf_daily: f64) -> f64 {
+    let dd = downside_deviation(returns, rf_daily);
+    if dd < 1e-12 { 0.0 } else { (mean(returns) - rf_daily) / dd * 252_f64.sqrt() }
+}
+
 // ── Monte Carlo ───────────────────────────────────────────────────────────────
 
-/// Build `n` random portfolios from the same universe of tickers,
-/// same cap filter, same number of stocks — but random selection and
-/// equal weight. Compare their final returns to our strategy.
+/// Compare the strategy against `n` random, equal-weight, buy-and-hold
+/// portfolios drawn **without replacement from the whole universe**, each the
+/// same size as the strategy's portfolio.
+///
+/// (An earlier version drew `n` names from a pool of exactly `n` names — the
+/// strategy's own holdings — so every "random" portfolio was identical and the
+/// beat-rate was meaningless.)
+///
+/// `n_simulations == 0` in the result means it could not be computed (the
+/// universe is no larger than the portfolio).
 pub fn monte_carlo_baseline(
     result: &SimulationResult,
     n_simulations: usize,
     seed: u64,
 ) -> MonteCarloResult {
-    let snapshots = &result.snapshots;
-    if snapshots.is_empty() {
-        return MonteCarloResult {
-            n_simulations,
+    let not_computed = |why: &str| {
+        warn!("Monte Carlo baseline skipped: {why}");
+        MonteCarloResult {
+            n_simulations: 0,
             median_return: 0.0,
-            percentile_5:  0.0,
+            percentile_5: 0.0,
             percentile_95: 0.0,
-            beat_strategy_pct: 100.0,
-        };
+            beat_strategy_pct: 0.0,
+        }
+    };
+
+    // Typical portfolio size = median number of live holdings.
+    let mut sizes: Vec<usize> = result
+        .snapshots
+        .iter()
+        .map(|s| s.holdings.len())
+        .filter(|&n| n > 0)
+        .collect();
+    if sizes.is_empty() {
+        return not_computed("strategy held nothing");
     }
+    sizes.sort_unstable();
+    let k = sizes[sizes.len() / 2];
 
-    // Collect all tickers and their per-day price relative to day 0
-    // We use the holdings from the first snapshot as our universe proxy
-    let all_tickers: Vec<String> = snapshots[0].holdings.keys().cloned().collect();
-    let n_stocks = all_tickers.len();
+    // Sorted so a fixed seed gives a fixed answer (HashMap order is random).
+    let mut pool: Vec<(&String, f64)> = result
+        .universe_returns
+        .iter()
+        .filter(|(_, r)| r.is_finite())
+        .map(|(t, &r)| (t, r))
+        .collect();
+    pool.sort_by(|a, b| a.0.cmp(b.0));
 
-    if n_stocks == 0 {
-        return MonteCarloResult {
-            n_simulations,
-            median_return: 0.0,
-            percentile_5:  0.0,
-            percentile_95: 0.0,
-            beat_strategy_pct: 100.0,
-        };
+    if pool.len() <= k {
+        return not_computed(&format!(
+            "universe of {} names is not larger than the {}-name portfolio",
+            pool.len(),
+            k
+        ));
     }
-
-    // Build ticker → [daily_value_relative] from snapshot holdings
-    // relative = holding_value_day_t / holding_value_day_0
-    let ticker_relatives: HashMap<String, Vec<f64>> = build_ticker_relatives(snapshots);
 
     let strategy_return = result.total_return();
-
     let mut rng = StdRng::seed_from_u64(seed);
-    let mut sim_returns: Vec<f64> = Vec::with_capacity(n_simulations);
+    let mut sims: Vec<f64> = (0..n_simulations)
+        .map(|_| {
+            let chosen: Vec<&(&String, f64)> = pool.choose_multiple(&mut rng, k).collect();
+            chosen.iter().map(|(_, r)| *r).sum::<f64>() / k as f64
+        })
+        .collect();
+    sims.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
-    for _ in 0..n_simulations {
-        // Pick a random subset of same size as our strategy portfolio
-        let chosen: Vec<&String> = all_tickers
-            .choose_multiple(&mut rng, n_stocks)
-            .collect();
-
-        // Equal-weight portfolio return
-        let portfolio_return = random_portfolio_return(&chosen, &ticker_relatives);
-        sim_returns.push(portfolio_return);
-    }
-
-    sim_returns.sort_by(|a, b| a.partial_cmp(b).unwrap());
-
-    let median_return   = percentile(&sim_returns, 50.0);
-    let percentile_5    = percentile(&sim_returns, 5.0);
-    let percentile_95   = percentile(&sim_returns, 95.0);
-    let beat_count      = sim_returns.iter().filter(|&&r| r > strategy_return).count();
-    let beat_strategy_pct = beat_count as f64 / n_simulations as f64 * 100.0;
+    let beat = sims.iter().filter(|&&r| r > strategy_return).count();
+    let out = MonteCarloResult {
+        n_simulations,
+        median_return: percentile(&sims, 50.0),
+        percentile_5: percentile(&sims, 5.0),
+        percentile_95: percentile(&sims, 95.0),
+        beat_strategy_pct: beat as f64 / n_simulations.max(1) as f64 * 100.0,
+    };
 
     info!(
-        "Monte Carlo ({} sims): median={:.2}%  p5={:.2}%  p95={:.2}%  \
-         random beat strategy {:.1}% of the time",
-        n_simulations,
-        median_return * 100.0,
-        percentile_5 * 100.0,
-        percentile_95 * 100.0,
-        beat_strategy_pct,
+        "Monte Carlo ({} sims of {} of {} names): median={:.2}%  p5={:.2}%  p95={:.2}%  random beat strategy {:.1}%",
+        n_simulations, k, pool.len(),
+        out.median_return * 100.0, out.percentile_5 * 100.0, out.percentile_95 * 100.0,
+        out.beat_strategy_pct,
     );
-
-    MonteCarloResult {
-        n_simulations,
-        median_return,
-        percentile_5,
-        percentile_95,
-        beat_strategy_pct,
-    }
+    out
 }
 
 // ── Drawdown computation ──────────────────────────────────────────────────────
@@ -237,8 +263,8 @@ fn compute_drawdowns(
     let mut peak_value  = snapshots[0].portfolio_value;
     let mut peak_date   = snapshots[0].date;
     let mut in_drawdown = false;
-    let mut trough_value = peak_value;
-    let mut trough_date  = peak_date;
+    let _trough_value = peak_value;
+    let _trough_date  = peak_date;
 
     let mut max_drawdown = 0.0_f64;
     let mut periods: Vec<DrawdownPeriod> = Vec::new();
@@ -299,7 +325,9 @@ fn compute_drawdowns(
     }
 
     // Sort by severity
-    periods.sort_by(|a, b| a.drawdown_pct.partial_cmp(&b.drawdown_pct).unwrap());
+    periods.sort_by(|a, b| {
+        a.drawdown_pct.partial_cmp(&b.drawdown_pct).unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     (max_drawdown, periods)
 }
@@ -333,76 +361,22 @@ fn std_dev(values: &[f64]) -> f64 {
     variance.sqrt()
 }
 
-/// Downside deviation — std dev of returns below `threshold` (typically 0).
+/// Downside deviation: √(mean of min(0, r − threshold)² over **all** returns).
 fn downside_deviation(returns: &[f64], threshold: f64) -> f64 {
-    let negatives: Vec<f64> = returns
+    if returns.is_empty() {
+        return 0.0;
+    }
+    let sum_sq: f64 = returns
         .iter()
-        .filter(|&&r| r < threshold)
-        .map(|&r| (r - threshold).powi(2))
-        .collect();
-
-    if negatives.is_empty() { return 0.0; }
-
-    let mean_sq = negatives.iter().sum::<f64>() / negatives.len() as f64;
-    mean_sq.sqrt()
+        .map(|&r| (r - threshold).min(0.0).powi(2))
+        .sum();
+    (sum_sq / returns.len() as f64).sqrt()
 }
 
 fn percentile(sorted: &[f64], p: f64) -> f64 {
     if sorted.is_empty() { return 0.0; }
     let idx = ((p / 100.0) * (sorted.len() - 1) as f64).round() as usize;
     sorted[idx.min(sorted.len() - 1)]
-}
-
-// ── Monte Carlo helpers ───────────────────────────────────────────────────────
-
-/// Build ticker → [value_relative_to_day0] from snapshot holdings.
-/// Relative = value_on_day_t / value_on_day_0.
-fn build_ticker_relatives(snapshots: &[PortfolioSnapshot]) -> HashMap<String, Vec<f64>> {
-    let mut out: HashMap<String, Vec<f64>> = HashMap::new();
-
-    // Seed initial values from day 0
-    let day0 = &snapshots[0];
-    for (ticker, &v0) in &day0.holdings {
-        if v0 > 0.0 {
-            out.insert(ticker.clone(), vec![1.0]);
-        }
-    }
-
-    // Walk forward
-    for snap in snapshots.iter().skip(1) {
-        for (ticker, relatives) in &mut out {
-            let v0 = day0.holdings.get(ticker).copied().unwrap_or(0.0);
-            let vt = snap.holdings.get(ticker).copied().unwrap_or(0.0);
-            let rel = if v0 > 0.0 { vt / v0 } else { 1.0 };
-            relatives.push(rel);
-        }
-    }
-
-    out
-}
-
-/// Compute the total return of an equal-weight random portfolio
-/// using pre-built ticker relatives.
-fn random_portfolio_return(
-    tickers: &[&String],
-    relatives: &HashMap<String, Vec<f64>>,
-) -> f64 {
-    let valid: Vec<&Vec<f64>> = tickers
-        .iter()
-        .filter_map(|t| relatives.get(*t))
-        .collect();
-
-    if valid.is_empty() { return 0.0; }
-
-    // Final value = average of each ticker's terminal relative value
-    let n = valid.len() as f64;
-    let terminal: f64 = valid
-        .iter()
-        .map(|rels| rels.last().copied().unwrap_or(1.0))
-        .sum::<f64>()
-        / n;
-
-    terminal - 1.0  // convert to return
 }
 
 // ── Empty report ──────────────────────────────────────────────────────────────
@@ -425,5 +399,165 @@ impl MetricsReport {
             trading_days:      0,
             total_swaps:       0,
         }
+    }
+}
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::portfolio::engine::{RebalanceFrequency, SimulationConfig};
+    use crate::portfolio::weights::WeightMode;
+    use chrono::Duration;
+    use std::collections::HashMap;
+
+    fn d(s: &str) -> NaiveDate {
+        s.parse().unwrap()
+    }
+
+    fn config() -> SimulationConfig {
+        SimulationConfig {
+            start_date: d("2024-01-01"),
+            end_date: d("2024-12-31"),
+            initial_capital: 1_000.0,
+            rebalance_freq: RebalanceFrequency::Monthly,
+            weight_mode: WeightMode::Equal,
+            active_roles: vec![],
+            benchmark_ticker: "^GSPC".into(),
+            transaction_cost_bps: 0.0,
+        }
+    }
+
+    /// Snapshots growing at `daily` per day vs. a benchmark growing at `bench`.
+    fn result(daily: f64, bench: f64, n: usize, universe_returns: HashMap<String, f64>) -> SimulationResult {
+        let mut snaps = Vec::new();
+        for i in 0..n {
+            let pv = 1_000.0 * (1.0 + daily).powi(i as i32);
+            let mut holdings = HashMap::new();
+            for t in ["H1", "H2", "H3"] {
+                holdings.insert(t.to_string(), pv / 3.0);
+            }
+            snaps.push(PortfolioSnapshot {
+                date: d("2024-01-01") + Duration::days(i as i64),
+                portfolio_value: pv,
+                benchmark_value: 1_000.0 * (1.0 + bench).powi(i as i32),
+                holdings,
+            });
+        }
+        SimulationResult {
+            snapshots: snaps,
+            swap_log: vec![],
+            role_performance: vec![],
+            industry_perf: vec![],
+            config: config(),
+            universe_returns,
+        }
+    }
+
+    fn universe_of(n: usize) -> HashMap<String, f64> {
+        (0..n).map(|i| (format!("T{i:02}"), -0.5 + i as f64 * 0.05)).collect()
+    }
+
+    #[test]
+    fn monte_carlo_draws_differ_so_the_distribution_is_not_degenerate() {
+        // Regression: the old code sampled n-of-n, giving p5 == p95 == median.
+        let r = result(0.001, 0.0, 30, universe_of(30));
+        let mc = monte_carlo_baseline(&r, 2_000, 7);
+        assert_eq!(mc.n_simulations, 2_000);
+        assert!(mc.percentile_95 > mc.percentile_5 + 0.05, "p5={} p95={}", mc.percentile_5, mc.percentile_95);
+    }
+
+    #[test]
+    fn monte_carlo_beat_rate_reflects_relative_performance() {
+        // Strategy ≈ +300%: nothing random can match it.
+        let strong = result(0.05, 0.0, 30, universe_of(30));
+        assert!(monte_carlo_baseline(&strong, 1_000, 1).beat_strategy_pct < 1.0);
+        // Strategy ≈ −60%: nearly every random portfolio beats it.
+        let weak = result(-0.03, 0.0, 30, universe_of(30));
+        assert!(monte_carlo_baseline(&weak, 1_000, 1).beat_strategy_pct > 99.0);
+    }
+
+    #[test]
+    fn monte_carlo_is_reproducible_for_a_fixed_seed() {
+        let r = result(0.001, 0.0, 30, universe_of(30));
+        let a = monte_carlo_baseline(&r, 500, 99);
+        let b = monte_carlo_baseline(&r, 500, 99);
+        assert_eq!(a.median_return, b.median_return);
+        assert_eq!(a.beat_strategy_pct, b.beat_strategy_pct);
+    }
+
+    #[test]
+    fn monte_carlo_is_skipped_when_the_universe_is_no_bigger_than_the_portfolio() {
+        let r = result(0.001, 0.0, 30, universe_of(3)); // 3 holdings, 3 names
+        assert_eq!(monte_carlo_baseline(&r, 500, 1).n_simulations, 0);
+        let empty = result(0.001, 0.0, 30, HashMap::new());
+        assert_eq!(monte_carlo_baseline(&empty, 500, 1).n_simulations, 0);
+    }
+
+    #[test]
+    fn risk_free_rate_lowers_sharpe_and_sortino() {
+        // Noisy but positive.
+        let mut r = result(0.0, 0.0, 60, universe_of(30));
+        for (i, s) in r.snapshots.iter_mut().enumerate() {
+            let noise = if i % 2 == 0 { 0.004 } else { -0.001 };
+            s.portfolio_value = 1_000.0 * (1.0 + 0.0015 * i as f64 + noise);
+        }
+        let raw = compute_metrics_with(&r, &MetricsOptions::default());
+        let with_rf = compute_metrics_with(&r, &MetricsOptions { risk_free_annual: 0.25, ..Default::default() });
+        assert!(raw.sharpe_ratio > with_rf.sharpe_ratio);
+        assert!(raw.sortino_ratio > with_rf.sortino_ratio);
+    }
+
+    #[test]
+    fn alpha_is_strategy_minus_benchmark() {
+        let r = result(0.002, 0.0005, 100, universe_of(30));
+        let m = compute_metrics(&r, false);
+        assert!(m.alpha > 0.0);
+        assert!((m.alpha - (m.total_return - m.benchmark_return)).abs() < 1e-12);
+        assert!(m.annualised_alpha > 0.0);
+    }
+
+    #[test]
+    fn steady_growth_has_no_drawdown() {
+        let m = compute_metrics(&result(0.001, 0.0, 50, universe_of(30)), false);
+        assert_eq!(m.max_drawdown, 0.0);
+        assert!(m.drawdown_periods.is_empty());
+    }
+
+    #[test]
+    fn drawdown_is_detected_with_its_recovery() {
+        let mut r = result(0.0, 0.0, 6, universe_of(30));
+        for (s, v) in r.snapshots.iter_mut().zip([100.0, 120.0, 60.0, 90.0, 121.0, 125.0]) {
+            s.portfolio_value = v;
+        }
+        r.config.initial_capital = 100.0;
+        let (max_dd, periods) = compute_drawdowns(&r.snapshots);
+        assert!((max_dd + 0.5).abs() < 1e-9, "max dd {max_dd}");
+        assert_eq!(periods.len(), 1);
+        assert!(periods[0].recovery_date.is_some());
+    }
+
+    #[test]
+    fn downside_deviation_counts_all_observations() {
+        // One −2% day among four flat days: √(0.02² / 5) = 0.00894…
+        let dd = downside_deviation(&[0.0, 0.0, -0.02, 0.0, 0.0], 0.0);
+        assert!((dd - (0.02f64.powi(2) / 5.0).sqrt()).abs() < 1e-12);
+        assert_eq!(downside_deviation(&[0.01, 0.02], 0.0), 0.0);
+        assert_eq!(downside_deviation(&[], 0.0), 0.0);
+    }
+
+    #[test]
+    fn too_few_snapshots_yields_an_empty_report() {
+        let r = result(0.001, 0.0, 1, universe_of(30));
+        assert_eq!(compute_metrics(&r, true).trading_days, 0);
+    }
+
+    #[test]
+    fn percentile_picks_the_expected_element() {
+        let v = [1.0, 2.0, 3.0, 4.0, 5.0];
+        assert_eq!(percentile(&v, 0.0), 1.0);
+        assert_eq!(percentile(&v, 50.0), 3.0);
+        assert_eq!(percentile(&v, 100.0), 5.0);
+        assert_eq!(percentile(&[], 50.0), 0.0);
     }
 }

@@ -4,10 +4,12 @@ use chrono::{Duration, NaiveDate};
 use reqwest::{Client, header};
 use serde::Deserialize;
 use std::collections::HashMap;
-use std::sync::OnceLock;
 use tokio::sync::Mutex;
 
+use super::asof::AsOf;
 use super::cache::Cache;
+use super::prices::momentum_12m1m;
+use super::sec_facts::SecFactsFetcher;
 use super::source::{AssetInfo, DataSource, FundamentalSnapshot, MarketCap, PriceBar};
 
 // ── Yahoo Finance JSON shapes (v8 chart API) ─────────────────────────────────
@@ -77,6 +79,7 @@ pub struct YahooFinance {
     client: Client,
     cache:  Cache,
     crumb:  Mutex<Option<YahooCrumb>>,
+    sec:    SecFactsFetcher,
 }
 
 impl YahooFinance {
@@ -108,6 +111,7 @@ impl YahooFinance {
                 .timeout(std::time::Duration::from_secs(20))
                 .build()
                 .expect("HTTP client construction failed"),
+            sec: SecFactsFetcher::new(cache.clone()),
             cache,
             crumb: Mutex::new(None),
         }
@@ -410,8 +414,34 @@ impl DataSource for YahooFinance {
         ticker: &str,
         as_of: NaiveDate,
     ) -> Result<FundamentalSnapshot> {
-        if let Some(snap) = self.cache.get_fundamentals(ticker, as_of)? {
+        let view = AsOf::new(&self.cache, as_of);
+
+        // 1. Cached, and only if its provenance is valid for this date.
+        if let Some(snap) = view.fundamentals(ticker)? {
             return Ok(snap);
+        }
+
+        // 2. Point-in-time from dated SEC filings (US issuers). Correct for any date.
+        match self.sec.snapshot(ticker, as_of).await {
+            Ok(mut snap) => {
+                snap.price_return_12m_1m = view
+                    .price_bars(ticker, 400)
+                    .ok()
+                    .and_then(|bars| momentum_12m1m(&bars));
+                self.cache.insert_fundamentals(&snap, "sec_pit")?;
+                return Ok(snap);
+            }
+            Err(e) => tracing::debug!(ticker = %ticker, "no SEC point-in-time fundamentals: {e:#}"),
+        }
+
+        // 3. Yahoo only ever returns TODAY's numbers. That is honest for a live
+        //    date and a look-ahead leak for any other — so refuse the latter
+        //    instead of stamping current data with an old date (the old bug).
+        if view.is_historical() {
+            return Err(anyhow!(
+                "no point-in-time fundamentals for {ticker} as of {as_of}; \
+                 Yahoo's current snapshot would leak the future"
+            ));
         }
 
         let data = self
@@ -424,10 +454,15 @@ impl DataSource for YahooFinance {
         let fin   = data.get("financialData").cloned().unwrap_or_default();
         let stats = data.get("defaultKeyStatistics").cloned().unwrap_or_default();
 
-        let revenue_ttm    = fin.get("totalRevenue").and_then(Self::extract_raw);
-        let net_margin_pct = fin.get("profitMargins").and_then(Self::extract_raw).map(|v| v * 100.0);
-        let debt_to_equity = fin.get("debtToEquity").and_then(Self::extract_raw);
-        let price_to_book  = stats.get("priceToBook").and_then(Self::extract_raw);
+        let revenue_ttm       = fin.get("totalRevenue").and_then(Self::extract_raw);
+        let net_margin_pct    = fin.get("profitMargins").and_then(Self::extract_raw).map(|v| v * 100.0);
+        let debt_to_equity    = fin.get("debtToEquity").and_then(Self::extract_raw);
+        let price_to_book     = stats.get("priceToBook").and_then(Self::extract_raw);
+        let operating_cashflow = fin.get("operatingCashflow").and_then(Self::extract_raw);
+        let return_on_assets  = fin.get("returnOnAssets").and_then(Self::extract_raw).map(|v| v * 100.0);
+        let gross_profit_margin = fin.get("grossProfits")
+            .and_then(Self::extract_raw)
+            .and_then(|gp| revenue_ttm.filter(|&rev| rev > 0.0).map(|rev| gp / rev * 100.0));
 
         let snap = FundamentalSnapshot {
             ticker: ticker.to_string(),
@@ -437,11 +472,17 @@ impl DataSource for YahooFinance {
             net_margin_pct,
             debt_to_equity,
             price_to_book,
-            price_return_12m_1m: None,
+            price_return_12m_1m: view
+                .price_bars(ticker, 400)
+                .ok()
+                .and_then(|bars| momentum_12m1m(&bars)),
             market_share_proxy: None,
+            operating_cashflow,
+            return_on_assets,
+            gross_profit_margin,
         };
 
-        self.cache.insert_fundamentals(&snap)?;
+        self.cache.insert_fundamentals(&snap, "yahoo_current")?;
         Ok(snap)
     }
 }

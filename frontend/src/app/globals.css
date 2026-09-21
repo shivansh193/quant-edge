@@ -1,0 +1,61 @@
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&family=Inter:wght@300;400;500;600&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --color-bg:       #0D0D0D;
+  --color-panel:    #141414;
+  --color-border:   #1E1E1E;
+  --color-accent:   #00E5FF;
+  --color-positive: #00C853;
+  --color-negative: #FF1744;
+}
+
+html,
+body {
+  background-color: var(--color-bg);
+  color: #E0E0E0;
+  font-family: 'Inter', system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 4px; height: 4px; }
+::-webkit-scrollbar-track { background: var(--color-panel); }
+::-webkit-scrollbar-thumb { background: #333; border-radius: 2px; }
+::-webkit-scrollbar-thumb:hover { background: #555; }
+
+/* Tables */
+table { border-collapse: collapse; width: 100%; }
+th { text-align: left; font-size: 0.7rem; text-transform: uppercase;
+     letter-spacing: 0.08em; color: #666; padding: 0.5rem 0.75rem;
+     border-bottom: 1px solid var(--color-border); }
+td { padding: 0.5rem 0.75rem; border-bottom: 1px solid #111;
+     font-family: 'JetBrains Mono', monospace; font-size: 0.8rem; }
+tr:hover td { background: #1a1a1a; }
+
+/* Inputs */
+input, select, textarea {
+  background: #1a1a1a;
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  color: #E0E0E0;
+  padding: 0.4rem 0.6rem;
+  font-size: 0.875rem;
+  outline: none;
+  transition: border-color 0.15s;
+}
+input:focus, select:focus, textarea:focus {
+  border-color: var(--color-accent);
+}
+
+/* Recharts tooltip */
+.recharts-default-tooltip {
+  background: #1a1a1a !important;
+  border: 1px solid #333 !important;
+  border-radius: 4px !important;
+  font-family: 'JetBrains Mono', monospace !important;
+  font-size: 0.75rem !important;
+}

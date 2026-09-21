@@ -15,6 +15,25 @@ pub struct PriceBar {
     pub volume: u64,
 }
 
+impl PriceBar {
+    /// Split/dividend-adjusted factor for this bar (`adj_close / close`).
+    pub fn adj_factor(&self) -> f64 {
+        if self.close > 0.0 && self.adj_close > 0.0 {
+            self.adj_close / self.close
+        } else {
+            1.0
+        }
+    }
+
+    /// Open price on the same adjusted basis as `adj_close`.
+    ///
+    /// Yahoo's `open` is unadjusted while `adj_close` is not, so mixing them
+    /// silently corrupts returns around dividends and splits.
+    pub fn adj_open(&self) -> f64 {
+        self.open * self.adj_factor()
+    }
+}
+
 /// Market cap tier — used for universe filtering
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum MarketCap {
@@ -49,6 +68,11 @@ pub struct FundamentalSnapshot {
     pub price_to_book: Option<f64>,       // DeepValue
     pub price_return_12m_1m: Option<f64>, // MomentumLeader (12m-1m momentum)
     pub market_share_proxy: Option<f64>,  // ConsumerReach (revenue / industry total)
+
+    // Extra fields for full 9-point Piotroski F-score
+    pub operating_cashflow: Option<f64>,  // CFO > 0 and CFO > net income (accruals)
+    pub return_on_assets: Option<f64>,    // ROA = net income / total assets
+    pub gross_profit_margin: Option<f64>, // Gross profit / revenue
 }
 
 /// The core trait — every data source implements this.

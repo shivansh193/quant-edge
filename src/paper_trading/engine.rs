@@ -84,7 +84,7 @@ impl PaperTradingEngine {
             .context("Picking engine failed during paper init")?;
 
         let top_n = spec.top_n;
-        let mut picks: Vec<_> = scores
+        let picks: Vec<_> = scores
             .iter()
             .filter(|s| {
                 spec.filters.min_score.map(|m| s.composite >= m).unwrap_or(true)

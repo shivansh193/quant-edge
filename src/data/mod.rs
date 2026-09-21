@@ -1,4 +1,5 @@
 pub mod source;
+pub mod prices;
 pub mod yahoo;
 pub mod cache;
 pub mod types;
@@ -6,8 +7,12 @@ pub mod edgar;
 pub mod gdelt;
 pub mod reddit;
 pub mod fred;
+pub mod sec_facts;
+pub mod asof;
 
+pub use prices::{PriceSeries, PriceStore};
 pub use source::{DataSource, PriceBar, FundamentalSnapshot, AssetInfo, MarketCap};
+pub use cache::StrategyRunRow;
 pub use types::{InsiderTrade, IndustryCorrelation, MacroDataPoint, MacroSnapshot, NewsItem, RedditSnapshot};
 pub use edgar::EdgarFetcher;
 pub use gdelt::GdeltFetcher;

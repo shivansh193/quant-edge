@@ -81,8 +81,11 @@ impl CorrelationEngine {
 
         let industry_returns = self.compute_industry_returns(industry_tickers, from, as_of)?;
 
-        if self.cache.has_correlation_cache(WINDOW_DAYS) {
-            if let Ok(stored) = self.cache.get_industry_correlations(WINDOW_DAYS) {
+        // Reuse a matrix only if it was computed on/before as_of and is under a
+        // week old *at as_of* (the old wall-clock check could load a matrix built
+        // from data after as_of when re-running a historical backtest).
+        {
+            if let Ok(stored) = self.cache.get_industry_correlations_asof(WINDOW_DAYS, as_of, 7) {
                 if !stored.is_empty() {
                     let n = stored.len();
                     let matrix = stored

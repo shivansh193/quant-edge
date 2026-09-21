@@ -1,11 +1,9 @@
 use std::collections::HashMap;
-use chrono::Datelike;
 
 use crate::correlations::{concentration_guard::CorrelationWarning, CorrelationData, print_correlation_report};
 use crate::metrics::stats::{MetricsReport, DrawdownPeriod, MonteCarloResult};
 use crate::portfolio::engine::{SimulationResult, RolePerformance, IndustryPerformance};
 use crate::portfolio::rebalancer::SwapEvent;
-use crate::roles::classifier::Role;
 use crate::signals::{SignalScore, macro_filter::macro_regime_description};
 use crate::data::MacroSnapshot;
 use std::sync::Arc;
@@ -273,6 +271,13 @@ impl CliReporter {
     // ── Monte Carlo ───────────────────────────────────────────────────────────
 
     fn print_monte_carlo(mc: &MonteCarloResult, strategy_return: f64) {
+        if mc.n_simulations == 0 {
+            println!();
+            println!("{BOLD}{CYAN}  MONTE CARLO BASELINE{RESET}");
+            println!("  {DIM}Not computed: the universe is no larger than the portfolio, so there is{RESET}");
+            println!("  {DIM}nothing to sample from. Widen the universe to get a meaningful baseline.{RESET}");
+            return;
+        }
         println!();
         println!("{BOLD}{CYAN}  MONTE CARLO BASELINE  ({} random portfolios){RESET}", mc.n_simulations);
         println!();

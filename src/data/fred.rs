@@ -4,7 +4,9 @@ use reqwest::{header, Client};
 use tracing::{debug, info, warn};
 
 use super::cache::Cache;
+use super::source::{DataSource, PriceBar};
 use super::types::{MacroDataPoint, MacroSnapshot};
+use super::yahoo::YahooFinance;
 
 // ── FRED graph CSV endpoint — free, no API key required ──────────────────────
 // Cache TTL: 24 hours
@@ -13,7 +15,15 @@ const FRED_DELAY_MS: u64 = 500;
 
 /// Series IDs we track
 const VIX_SERIES: &str = "VIXCLS";
-const YIELD_10Y_SERIES: &str = "GS10";
+// DGS10 is the DAILY 10-year yield. (GS10, used before, is a MONTHLY average,
+// far too coarse for a "30-day spike" test.)
+const YIELD_10Y_SERIES: &str = "DGS10";
+
+/// Yahoo symbols carrying the same information, as daily closes. Yahoo is tried
+/// first: it is the same source the rest of the tool depends on, and FRED's CSV
+/// endpoint proved unreachable/very slow in testing.
+const VIX_YAHOO: &str = "^VIX";
+const YIELD_10Y_YAHOO: &str = "^TNX"; // quoted in percent, e.g. 4.25 = 4.25%
 
 pub struct FredFetcher {
     client: Client,
@@ -41,16 +51,45 @@ impl FredFetcher {
     /// Build a MacroSnapshot for `as_of` date.
     /// Fetches VIX and 10Y yield from FRED (with 24h cache).
     pub async fn macro_snapshot(&self, as_of: NaiveDate) -> MacroSnapshot {
-        // Fetch / refresh macro series
-        for series_id in &[VIX_SERIES, YIELD_10Y_SERIES] {
-            if !self.cache.has_macro_cache(series_id, 24) {
+        // Fetch / refresh macro series: Yahoo first, FRED as the fallback.
+        for (series_id, yahoo_symbol) in [(VIX_SERIES, VIX_YAHOO), (YIELD_10Y_SERIES, YIELD_10Y_YAHOO)] {
+            if self.cache.has_macro_cache(series_id, 24) {
+                continue;
+            }
+            if let Err(e) = self.refresh_from_yahoo(series_id, yahoo_symbol).await {
+                warn!(series_id = %series_id, "Yahoo macro refresh failed: {:#} - trying FRED", e);
                 if let Err(e) = self.refresh_series(series_id).await {
-                    warn!(series_id = %series_id, "FRED refresh failed: {:#}", e);
+                    warn!(series_id = %series_id, "FRED refresh failed too: {:#}", e);
                 }
             }
         }
 
-        self.build_snapshot(as_of)
+        let snapshot = self.build_snapshot(as_of);
+        if snapshot.vix.is_none() && snapshot.yield_10y.is_none() {
+            // Fail-open is the documented default, but it must never be silent:
+            // before this warning existed the macro gate ran without any data
+            // (the macro_data table was empty) and nothing said so.
+            warn!(
+                as_of = %as_of,
+                "MACRO GATE HAS NO DATA (VIX and 10Y both unavailable): treating every date as risk-on"
+            );
+        }
+        snapshot
+    }
+
+    /// Load a daily macro series from Yahoo and store it under `series_id`.
+    async fn refresh_from_yahoo(&self, series_id: &str, symbol: &str) -> Result<()> {
+        let yahoo = YahooFinance::new(self.cache.clone());
+        let from = NaiveDate::from_ymd_opt(2010, 1, 1).expect("valid date");
+        let today = chrono::Local::now().date_naive();
+        let bars = yahoo
+            .price_history(symbol, from, today)
+            .await
+            .with_context(|| format!("Yahoo history for {symbol} failed"))?;
+        let points = bars_to_macro_points(series_id, &bars);
+        anyhow::ensure!(!points.is_empty(), "Yahoo returned no usable data for {symbol}");
+        info!(series_id = %series_id, source = %symbol, n = points.len(), "macro series cached from Yahoo");
+        self.cache.insert_macro_data(&points)
     }
 
     // ── FRED internals ────────────────────────────────────────────────────────
@@ -128,6 +167,14 @@ fn compute_macro_regime(
 
 // ── FRED CSV parser ───────────────────────────────────────────────────────────
 
+/// Daily closes as macro data points; non-finite or non-positive values dropped.
+pub fn bars_to_macro_points(series_id: &str, bars: &[PriceBar]) -> Vec<MacroDataPoint> {
+    bars.iter()
+        .filter(|b| b.close.is_finite() && b.close > 0.0)
+        .map(|b| MacroDataPoint { series_id: series_id.to_string(), date: b.date, value: b.close })
+        .collect()
+}
+
 fn parse_fred_csv(series_id: &str, text: &str) -> Result<Vec<MacroDataPoint>> {
     // FRED CSV: first line is header "DATE,VALUE", then data rows
     // Missing values are represented as "."
@@ -184,4 +231,32 @@ fn value_n_days_ago(pts: &[MacroDataPoint], as_of: NaiveDate, days: i64) -> Opti
         .filter(|p| p.date <= target)
         .last()
         .map(|p| p.value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bar(date: &str, close: f64) -> PriceBar {
+        PriceBar { date: date.parse().unwrap(), open: close, high: close, low: close, close, adj_close: close, volume: 0 }
+    }
+
+    #[test]
+    fn yahoo_closes_become_macro_points_and_bad_values_are_dropped() {
+        let pts = bars_to_macro_points(
+            "VIXCLS",
+            &[bar("2024-01-02", 13.2), bar("2024-01-03", f64::NAN), bar("2024-01-04", 0.0), bar("2024-01-05", 14.1)],
+        );
+        assert_eq!(pts.len(), 2);
+        assert!(pts.iter().all(|p| p.series_id == "VIXCLS"));
+        assert_eq!(pts[1].value, 14.1);
+    }
+
+    #[test]
+    fn regime_flips_on_high_vix_or_a_yield_spike() {
+        assert!(compute_macro_regime(Some(18.0), Some(4.0), Some(3.9)));
+        assert!(!compute_macro_regime(Some(31.0), Some(4.0), Some(3.9)), "VIX >= 25 is risk-off");
+        assert!(!compute_macro_regime(Some(15.0), Some(4.6), Some(4.0)), "+0.6 in 30d is a spike");
+        assert!(compute_macro_regime(None, None, None), "no data is fail-open (and now warns loudly)");
+    }
 }

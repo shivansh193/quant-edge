@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tracing::{debug, warn};
 
+use super::asof::{is_historical, AsOf};
 use super::cache::Cache;
 use super::types::InsiderTrade;
 
@@ -12,6 +13,12 @@ use super::types::InsiderTrade;
 
 const EDGAR_DELAY_MS: u64 = 150;
 const EDGAR_USER_AGENT: &str = "portfolio-sim research@example.com";
+
+/// One ticker->CIK map for the whole process (it is a ~1 MB download).
+fn shared_cik_map() -> Arc<Mutex<HashMap<String, u64>>> {
+    static MAP: std::sync::OnceLock<Arc<Mutex<HashMap<String, u64>>>> = std::sync::OnceLock::new();
+    MAP.get_or_init(|| Arc::new(Mutex::new(HashMap::new()))).clone()
+}
 
 /// Fetches Form 4 insider-trade filings from SEC EDGAR.
 /// All results are cached in SQLite with a 48-hour TTL.
@@ -25,14 +32,19 @@ pub struct EdgarFetcher {
 impl EdgarFetcher {
     pub fn new(cache: Cache) -> Self {
         let mut headers = header::HeaderMap::new();
-        headers.insert(
-            header::USER_AGENT,
-            header::HeaderValue::from_static(EDGAR_USER_AGENT),
-        );
-        headers.insert(
-            header::ACCEPT_ENCODING,
-            header::HeaderValue::from_static("gzip, deflate"),
-        );
+        // SEC requires a User-Agent that identifies you (name + contact email).
+        // Set SEC_USER_AGENT="Your Name you@example.com" in .env; the built-in
+        // placeholder works but may be rate-limited or blocked.
+        let ua = std::env::var("SEC_USER_AGENT")
+            .ok()
+            .and_then(|v| header::HeaderValue::from_str(&v).ok())
+            .unwrap_or_else(|| header::HeaderValue::from_static(EDGAR_USER_AGENT));
+        headers.insert(header::USER_AGENT, ua);
+        // Deliberately NO Accept-Encoding header: reqwest is built without gzip
+        // support here, and SEC honours the header, so asking for compression
+        // returned bytes we could not decode. Every CIK lookup failed, and the
+        // callers' unwrap_or_default() hid it - the insider signal was silently
+        // empty for every ticker.
         let client = Client::builder()
             .default_headers(headers)
             .timeout(std::time::Duration::from_secs(30))
@@ -42,7 +54,7 @@ impl EdgarFetcher {
         Self {
             client,
             cache,
-            cik_map: Arc::new(Mutex::new(HashMap::new())),
+            cik_map: shared_cik_map(),
         }
     }
 
@@ -56,11 +68,17 @@ impl EdgarFetcher {
         as_of: NaiveDate,
         days: u32,
     ) -> Result<Vec<InsiderTrade>> {
-        let from = as_of - Duration::days(days as i64);
+        let view = AsOf::new(&self.cache, as_of);
+
+        // A historical date can only be answered from filings we already hold:
+        // fetching "recent" filings now would describe the present, not then.
+        if is_historical(as_of) {
+            return view.insider_trades(ticker, days as i64);
+        }
 
         // Return cached data if fresh (48h TTL)
         if self.cache.has_insider_cache(ticker, 48) {
-            return self.cache.get_insider_trades(ticker, from, as_of);
+            return view.insider_trades(ticker, days as i64);
         }
 
         debug!(ticker = %ticker, "EDGAR: fetching Form 4 filings");
@@ -70,7 +88,7 @@ impl EdgarFetcher {
             Err(e) => {
                 warn!(ticker = %ticker, "EDGAR fetch failed: {:#}", e);
                 // Return whatever is in cache (may be stale but better than nothing)
-                return self.cache.get_insider_trades(ticker, from, as_of);
+                return view.insider_trades(ticker, days as i64);
             }
         };
 
@@ -78,7 +96,7 @@ impl EdgarFetcher {
             warn!(ticker = %ticker, "EDGAR cache write failed: {:#}", e);
         }
 
-        self.cache.get_insider_trades(ticker, from, as_of)
+        view.insider_trades(ticker, days as i64)
     }
 
     // ── EDGAR internals ───────────────────────────────────────────────────────
@@ -104,15 +122,37 @@ impl EdgarFetcher {
         Ok(all_trades)
     }
 
+    /// Download the XBRL "company facts" document for a ticker.
+    pub async fn company_facts(&self, ticker: &str) -> Result<serde_json::Value> {
+        let cik = self.get_cik(ticker).await?;
+        tokio::time::sleep(std::time::Duration::from_millis(EDGAR_DELAY_MS)).await;
+        let url = format!("https://data.sec.gov/api/xbrl/companyfacts/CIK{:010}.json", cik);
+        self.client
+            .get(&url)
+            .send()
+            .await
+            .context("EDGAR company facts request failed")?
+            .error_for_status()
+            .context("EDGAR company facts returned an error status")?
+            .json()
+            .await
+            .context("EDGAR company facts parse failed")
+    }
+
     /// Resolve ticker → CIK using EDGAR's company_tickers.json.
     async fn get_cik(&self, ticker: &str) -> Result<u64> {
         let upper = ticker.to_uppercase();
 
-        // Check in-memory cache first
+        // Check in-memory cache first. Once the map has been loaded, a ticker
+        // that is not in it (e.g. an NSE listing) has no CIK - fail fast rather
+        // than re-downloading the whole file on every call.
         {
             let guard = self.cik_map.lock().unwrap();
             if let Some(&cik) = guard.get(&upper) {
                 return Ok(cik);
+            }
+            if !guard.is_empty() {
+                return Err(anyhow!("CIK not found for ticker {}", ticker));
             }
         }
 
@@ -242,7 +282,7 @@ impl EdgarFetcher {
         let acc_nodash = accession.replace('-', "");
         let url = format!(
             "https://www.sec.gov/Archives/edgar/data/{}/{}/{}",
-            cik, acc_nodash, primary_doc
+            cik, acc_nodash, raw_form4_filename(primary_doc)
         );
 
         let xml = self
@@ -257,6 +297,13 @@ impl EdgarFetcher {
 
         Ok(parse_form4_xml(ticker, filing_date, &xml))
     }
+}
+
+/// The submissions index lists Form 4's primary document as the XSL-rendered
+/// view (e.g. `xslF345X05/wk-form4_123.xml`), which is HTML. The raw XML lives
+/// at the same filename without the `xsl...` directory.
+fn raw_form4_filename(primary_doc: &str) -> &str {
+    primary_doc.rsplit('/').next().unwrap_or(primary_doc)
 }
 
 // ── Form 4 XML parser (string-based, no extra dependency) ───────────────────
@@ -278,11 +325,15 @@ fn parse_form4_xml(ticker: &str, filing_date: NaiveDate, xml: &str) -> Vec<Insid
         let tx_type = xml_nested_val(&block, "transactionAcquiredDisposedCode", "value");
 
         if let (Some(td), Some(sh), Some(tt)) = (trade_date, shares, tx_type) {
-            // Only record open-market buys/sells (code P=purchase, S=sale)
-            // Exclude grants/awards (G, A codes are often compensation, not discretionary)
-            let tx_code = xml_nested_val(&block, "transactionCode", "value")
-                .unwrap_or_default();
-            if matches!(tx_code.as_str(), "P" | "S") || matches!(tt.as_str(), "A" | "D") {
+            // Only open-market purchases (P) and sales (S). Grants (A), option
+            // exercises (M), tax withholding (F), gifts (G) etc. are mechanical
+            // compensation events, not discretionary views. The previous
+            // `|| tt is A/D` clause let all of them through, contradicting the
+            // comment that described this filter.
+            // transactionCode is a plain text element (<transactionCode>S</...>),
+            // unlike the amounts/dates, which wrap their text in <value>.
+            let tx_code = xml_val(&block, "transactionCode").unwrap_or_default();
+            if matches!(tx_code.as_str(), "P" | "S") {
                 trades.push(InsiderTrade {
                     ticker: ticker.to_string(),
                     filing_date,
@@ -319,7 +370,7 @@ fn extract_insider_info(xml: &str) -> (String, String) {
         "CEO"
     } else if officer_title.contains("CFO") || officer_title.contains("CHIEF FINANCIAL") {
         "CFO"
-    } else if officer_title.contains("PRESIDENT") {
+    } else if officer_title.contains("PRESIDENT") && !officer_title.contains("VICE") {
         "President"
     } else if officer_title.contains("COO") || officer_title.contains("CHIEF OPERATING") {
         "COO"
@@ -401,4 +452,75 @@ fn xml_all_sections(xml: &str, tag: &str) -> Vec<String> {
     }
 
     result
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn d(s: &str) -> NaiveDate {
+        s.parse().unwrap()
+    }
+
+    /// Structure copied from a real Form 4 (values shortened).
+    fn form4(title: &str, txs: &[(&str, &str, &str, &str)]) -> String {
+        // (date, code, shares, acquired/disposed)
+        let mut body = String::new();
+        for (date, code, shares, ad) in txs {
+            body.push_str(&format!(
+                "<nonDerivativeTransaction>                   <securityTitle><value>Common Stock</value></securityTitle>                   <transactionDate><value>{date}</value></transactionDate>                   <transactionCoding><transactionFormType>4</transactionFormType>                     <transactionCode>{code}</transactionCode><equitySwapInvolved>0</equitySwapInvolved></transactionCoding>                   <transactionAmounts>                     <transactionShares><value>{shares}</value><footnoteId id=\"F1\"/></transactionShares>                     <transactionPricePerShare><value>10</value></transactionPricePerShare>                     <transactionAcquiredDisposedCode><value>{ad}</value></transactionAcquiredDisposedCode>                   </transactionAmounts>                 </nonDerivativeTransaction>"
+            ));
+        }
+        format!(
+            "<?xml version=\"1.0\"?><ownershipDocument>               <reportingOwner><reportingOwnerId><rptOwnerCik>1</rptOwnerCik><rptOwnerName>DOE JANE</rptOwnerName></reportingOwnerId>                 <reportingOwnerRelationship><isDirector>0</isDirector><isOfficer>1</isOfficer>                   <officerTitle>{title}</officerTitle></reportingOwnerRelationship></reportingOwner>               <nonDerivativeTable>{body}</nonDerivativeTable></ownershipDocument>"
+        )
+    }
+
+    #[test]
+    fn only_open_market_purchases_and_sales_are_kept() {
+        // Regression: this used to return 0 trades for every real filing
+        // (transactionCode was looked up as a nested <value>), and before that
+        // it returned tax-withholding and grants as if they were sales/buys.
+        let xml = form4(
+            "Chief Financial Officer",
+            &[
+                ("2024-05-01", "P", "100", "A"),  // open-market buy
+                ("2024-05-02", "S", "250", "D"),  // open-market sale
+                ("2024-05-03", "F", "999", "D"),  // tax withholding: NOT a view
+                ("2024-05-04", "A", "500", "A"),  // grant: NOT a view
+                ("2024-05-05", "M", "300", "A"),  // option exercise: NOT a view
+                ("2024-05-06", "G", "50", "D"),   // gift: NOT a view
+            ],
+        );
+        let trades = parse_form4_xml("XYZ", d("2024-05-07"), &xml);
+        assert_eq!(trades.len(), 2, "{trades:?}");
+        assert_eq!(trades[0].transaction_type, "A");
+        assert_eq!(trades[0].shares, 100.0);
+        assert_eq!(trades[1].transaction_type, "D");
+        assert_eq!(trades[1].trade_date, d("2024-05-02"));
+        assert!(trades.iter().all(|t| t.filing_date == d("2024-05-07")));
+        assert!(trades.iter().all(|t| t.insider_role == "CFO" && t.insider_name == "DOE JANE"));
+    }
+
+    #[test]
+    fn a_filing_with_only_compensation_events_yields_nothing() {
+        let xml = form4("Director", &[("2024-05-03", "F", "999", "D"), ("2024-05-04", "A", "500", "A")]);
+        assert!(parse_form4_xml("XYZ", d("2024-05-07"), &xml).is_empty());
+    }
+
+    #[test]
+    fn a_vice_president_is_not_treated_as_the_president() {
+        let xml = form4("Vice President, Sales", &[("2024-05-01", "P", "10", "A")]);
+        assert_eq!(parse_form4_xml("X", d("2024-05-02"), &xml)[0].insider_role, "Officer");
+        let xml = form4("President", &[("2024-05-01", "P", "10", "A")]);
+        assert_eq!(parse_form4_xml("X", d("2024-05-02"), &xml)[0].insider_role, "President");
+    }
+
+    #[test]
+    fn the_raw_xml_filename_drops_the_xsl_rendering_directory() {
+        // EDGAR's index points at the HTML-rendered view; the raw XML is one level up.
+        assert_eq!(raw_form4_filename("xslF345X06/wk-form4_1789766132.xml"), "wk-form4_1789766132.xml");
+        assert_eq!(raw_form4_filename("form4.xml"), "form4.xml");
+    }
 }

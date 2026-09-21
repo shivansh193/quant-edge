@@ -283,7 +283,7 @@ impl<'a> UniverseBuilder<'a> {
     async fn resolve_tickers(
         &self,
         tickers: &[String],
-        config: &UniverseConfig,
+        _config: &UniverseConfig,
     ) -> Vec<CompanySlot> {
         use futures::future::join_all;
 
@@ -373,7 +373,7 @@ fn resolve_industry_code(&self, _ticker: &str, slot: &CompanySlot) -> Option<u32
             all_tickers.iter().zip(results)
         {
             match result {
-                Ok((yahoo_industry_str, sector_code, ind_code, ind_name)) => {
+                Ok((_yahoo_industry_str, sector_code, ind_code, ind_name)) => {
                     if let Some(slots) = universe.by_industry.get_mut(industry_code) {
                         if let Some(slot) = slots.get_mut(*slot_idx) {
                             slot.industry_code = ind_code;

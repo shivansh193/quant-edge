@@ -1,8 +1,9 @@
 use anyhow::{Context, Result};
-use chrono::{Duration, NaiveDate};
+use chrono::NaiveDate;
 use reqwest::{header, Client};
 use tracing::{debug, warn};
 
+use super::asof::{is_historical, AsOf};
 use super::cache::Cache;
 use super::types::NewsItem;
 
@@ -11,6 +12,22 @@ use super::types::NewsItem;
 // Cache TTL: 6 hours
 
 const GDELT_DELAY_MS: u64 = 500;
+
+/// Why live news fetching is off. Found by testing against the real API:
+///   * ArtList articles carry NO `tone` field, so the old `unwrap_or(0.0)` made
+///     every article a perfectly neutral zero: the signal held no information;
+///   * GDELT allows one request per 5 seconds and answers throttled requests
+///     with plain text, which the parser then failed on (every request, in
+///     practice, for a 400+ ticker universe);
+///   * ticker symbols are poor keyword queries.
+/// A working version needs GDELT's TimelineTone mode, company-name queries and
+/// a shortlist rather than the whole universe. Until then the signal reports
+/// "no data" and is excluded from the composite instead of pretending.
+pub const NEWS_DISABLED_REASON: &str =
+    "GDELT news sentiment is disabled: article-list mode has no tone and the API allows 1 request / 5 s";
+
+/// Flip to true only after the TimelineTone redesign described above.
+const NEWS_FETCH_DISABLED: bool = true;
 
 pub struct GdeltFetcher {
     client: Client,
@@ -43,10 +60,13 @@ impl GdeltFetcher {
         as_of: NaiveDate,
         days: u32,
     ) -> Result<Vec<NewsItem>> {
-        let from = as_of - Duration::days(days as i64);
+        let view = AsOf::new(&self.cache, as_of);
 
-        if self.cache.has_news_cache(ticker, 6) {
-            return self.cache.get_news_items(ticker, from, as_of);
+        // Serve only what is already stored (articles carry their own dates).
+        // Never fetch: see NEWS_DISABLED_REASON. Historical dates could not be
+        // fetched anyway (GDELT's timespan is relative to *now*).
+        if NEWS_FETCH_DISABLED || is_historical(as_of) || self.cache.has_news_cache(ticker, 6) {
+            return view.news_items(ticker, days as i64);
         }
 
         debug!(ticker = %ticker, "GDELT: fetching news sentiment");
@@ -55,7 +75,7 @@ impl GdeltFetcher {
             Ok(i) => i,
             Err(e) => {
                 warn!(ticker = %ticker, "GDELT fetch failed: {:#}", e);
-                return self.cache.get_news_items(ticker, from, as_of);
+                return view.news_items(ticker, days as i64);
             }
         };
 
@@ -63,7 +83,7 @@ impl GdeltFetcher {
             warn!(ticker = %ticker, "GDELT cache write failed: {:#}", e);
         }
 
-        self.cache.get_news_items(ticker, from, as_of)
+        view.news_items(ticker, days as i64)
     }
 
     // ── GDELT internals ───────────────────────────────────────────────────────
@@ -114,10 +134,11 @@ fn parse_gdelt_response(ticker: &str, text: &str) -> Result<Vec<NewsItem>> {
     let mut items = Vec::new();
 
     for article in articles {
-        let tone = article
-            .get("tone")
-            .and_then(|v| v.as_f64())
-            .unwrap_or(0.0);
+        // No tone means no sentiment information: skip the article rather than
+        // record a fabricated neutral 0.0.
+        let Some(tone) = article.get("tone").and_then(|v| v.as_f64()) else {
+            continue;
+        };
 
         // GDELT seendate format: "20240115T120000Z" or "2024-01-15T12:00:00Z"
         let date_str = article

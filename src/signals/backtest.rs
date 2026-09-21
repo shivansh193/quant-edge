@@ -1,28 +1,70 @@
+//! Signal validation: does each signal predict subsequent returns?
+//!
+//! For each monthly test date we score every ticker with the signal, using only
+//! data available *at that date* (prices, SEC filings by filing date, and
+//! whatever news/insider history the cache holds), and correlate the scores
+//! (rank IC) with the return realised afterwards.
+//!
+//! Honesty rules this module enforces:
+//!   * A signal with no usable history is reported as **not evaluable**, never
+//!     as "IC = 0, no edge". Absence of evidence is not evidence of absence.
+//!   * A signal only "has edge" if its mean IC is positive *and* statistically
+//!     distinguishable from zero (t-stat), not on a bare threshold.
+//!   * Nothing is fitted, so the entire range is out-of-sample; `train_end` is
+//!     accepted for CLI compatibility and only recorded in the report.
+//!   * Known limits (survivorship, monthly overlapping windows) are listed in
+//!     the report's `notes`.
+
 use anyhow::Result;
 use chrono::{Datelike, Duration, NaiveDate};
+use rand::prelude::*;
+use rand::rngs::StdRng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tracing::info;
 
-use crate::data::{cache::Cache, yahoo::YahooFinance, DataSource};
+use crate::data::asof::AsOf;
+use crate::data::prices::{momentum_12m1m, PriceSeries, PriceStore};
+use crate::data::{cache::Cache, yahoo::YahooFinance, DataSource, FundamentalSnapshot};
+use crate::metrics::ic;
 use crate::universe::builder::Universe;
 
-use super::{mean, std_dev, MarketData, SignalWeights};
-use super::momentum::MomentumSignal;
 use super::fundamental::FundamentalSignal;
 use super::insider::InsiderSignal;
+use super::momentum::MomentumSignal;
 use super::sentiment::SentimentSignal;
-use super::{Signal, MacroSnapshot};
+use super::{MacroSnapshot, MarketData, Signal, SignalAvailability};
+
+/// Forward window over which a signal is judged.
+const HORIZON_DAYS: i64 = 30;
+/// A test date needs at least this many names with data to yield an IC.
+const MIN_NAMES: usize = 5;
+/// A signal needs at least this many test dates to be called evaluable.
+const MIN_DATES: usize = 6;
+/// Mean IC below this is not economically interesting even if "significant".
+const MIN_IC: f64 = 0.02;
+/// |t| needed to call an IC distinguishable from zero.
+const MIN_T: f64 = 2.0;
 
 // ── Output types ──────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SignalIcResult {
     pub signal_name: String,
-    pub ic_mean: f64,     // mean IC across all test dates
+    pub ic_mean: f64,     // mean rank IC across test dates
     pub ic_std: f64,      // std dev of IC across test dates
-    pub n_dates: usize,   // number of test dates
-    pub has_edge: bool,   // IC > 0.05
+    pub n_dates: usize,   // test dates that produced an IC
+    /// Mean IC > 0.02 AND t-stat > 2 AND enough dates. False when not evaluable.
+    pub has_edge: bool,
+    #[serde(default)]
+    pub t_stat: f64,
+    #[serde(default)]
+    pub hit_rate: f64,
+    /// False when there was too little history to judge the signal at all.
+    #[serde(default)]
+    pub evaluable: bool,
+    #[serde(default)]
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -33,6 +75,8 @@ pub struct MonteCarloComparison {
     pub random_p95: f64,
     pub percentile_rank: f64,       // % of random portfolios we beat
     pub n_simulations: usize,
+    #[serde(default)]
+    pub strategy_description: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -42,390 +86,89 @@ pub struct ValidationReport {
     pub test_period: (String, String),
     pub signal_ic: Vec<SignalIcResult>,
     pub monte_carlo: Option<MonteCarloComparison>,
+    #[serde(default)]
+    pub notes: Vec<String>,
 }
 
-// ── Walk-forward validator ────────────────────────────────────────────────────
+// ── Pure helpers (unit tested) ────────────────────────────────────────────────
 
-pub struct WalkForwardValidator {
-    cache: Cache,
-    yahoo: YahooFinance,
-    weights: SignalWeights,
-}
-
-impl WalkForwardValidator {
-    pub fn new(cache: Cache) -> Self {
-        let yahoo = YahooFinance::new(cache.clone());
-        Self {
-            cache,
-            yahoo,
-            weights: SignalWeights::default(),
-        }
-    }
-
-    /// Run walk-forward validation on the universe.
-    /// Train period: 2000-01-01 → train_end.
-    /// Test period:  test_start → test_end.
-    /// Returns IC per signal and optional Monte Carlo comparison.
-    pub async fn validate(
-        &self,
-        universe: &Universe,
-        train_end: NaiveDate,
-        test_start: NaiveDate,
-        test_end: NaiveDate,
-        run_monte_carlo: bool,
-    ) -> Result<ValidationReport> {
-        info!(
-            "Walk-forward validation: train through {}, test {} → {}",
-            train_end, test_start, test_end
-        );
-
-        let tickers: Vec<String> = universe.tickers();
-
-        // Monthly test dates within [test_start, test_end]
-        let test_dates = monthly_dates(test_start, test_end);
-        info!("Test dates: {} monthly checkpoints", test_dates.len());
-
-        // Define signals
-        let signals: Vec<(&str, &dyn Signal)> = vec![
-            ("Momentum",    &MomentumSignal    as &dyn Signal),
-            ("Fundamental", &FundamentalSignal as &dyn Signal),
-            ("Insider",     &InsiderSignal     as &dyn Signal),
-            ("Sentiment",   &SentimentSignal   as &dyn Signal),
-        ];
-
-        // Compute IC per signal
-        let mut ic_results: Vec<SignalIcResult> = Vec::new();
-
-        for (signal_name, signal) in &signals {
-            let ic_series = self
-                .compute_signal_ic(signal_name, *signal, &tickers, universe, &test_dates)
-                .await;
-
-            let ic_mean = mean(&ic_series);
-            let ic_std  = std_dev(&ic_series);
-            let has_edge = ic_mean > 0.05;
-
-            info!(
-                signal = %signal_name,
-                ic_mean = %format!("{:.4}", ic_mean),
-                ic_std  = %format!("{:.4}", ic_std),
-                has_edge = %has_edge,
-                "IC computed"
-            );
-
-            ic_results.push(SignalIcResult {
-                signal_name: signal_name.to_string(),
-                ic_mean,
-                ic_std,
-                n_dates: ic_series.len(),
-                has_edge,
-            });
-        }
-
-        // Optional Monte Carlo comparison
-        let monte_carlo = if run_monte_carlo {
-            Some(
-                self.run_monte_carlo(&tickers, test_start, test_end, &ic_results)
-                    .await
-                    .unwrap_or_else(|e| {
-                        tracing::warn!("Monte Carlo failed: {:#}", e);
-                        MonteCarloComparison {
-                            strategy_annualised_return: 0.0,
-                            random_median_return: 0.0,
-                            random_p5: 0.0,
-                            random_p95: 0.0,
-                            percentile_rank: 50.0,
-                            n_simulations: 0,
-                        }
-                    }),
-            )
-        } else {
-            None
-        };
-
-        Ok(ValidationReport {
-            generated_at: chrono::Local::now().to_rfc3339(),
-            train_period: (
-                "2000-01-01".to_string(),
-                train_end.to_string(),
-            ),
-            test_period: (
-                test_start.to_string(),
-                test_end.to_string(),
-            ),
-            signal_ic: ic_results,
-            monte_carlo,
-        })
-    }
-
-    // ── IC computation ────────────────────────────────────────────────────────
-
-    /// For each test date, compute (signal_score, 30d_forward_return) pairs,
-    /// then compute Pearson IC = correlation of scores and returns.
-    async fn compute_signal_ic(
-        &self,
-        _signal_name: &str,
-        signal: &dyn Signal,
-        tickers: &[String],
-        universe: &Universe,
-        test_dates: &[NaiveDate],
-    ) -> Vec<f64> {
-        let mut ic_series = Vec::new();
-
-        for &date in test_dates {
-            let forward_date = date + Duration::days(30);
-
-            // Gather (score, forward_return) pairs across all tickers
-            let mut pairs: Vec<(f64, f64)> = Vec::new();
-
-            for ticker in tickers {
-                // Build minimal market data for this ticker at this date
-                let Ok(data) = self.build_minimal_market_data(ticker, date, universe).await else {
-                    continue;
-                };
-
-                let score = signal.compute(ticker, &data);
-
-                // Forward return: price at date+30d / price at date - 1
-                let Ok(fwd_return) = self.compute_forward_return(ticker, date, forward_date).await
-                else {
-                    continue;
-                };
-
-                pairs.push((score, fwd_return));
-            }
-
-            if pairs.len() >= 5 {
-                let ic = pearson_correlation(&pairs);
-                ic_series.push(ic);
-            }
-        }
-
-        ic_series
-    }
-
-    async fn build_minimal_market_data(
-        &self,
-        ticker: &str,
-        as_of: NaiveDate,
-        universe: &Universe,
-    ) -> Result<MarketData> {
-        let price_from = as_of - Duration::days(400);
-
-        let price_bars = self
-            .yahoo
-            .price_history(ticker, price_from, as_of)
-            .await
-            .unwrap_or_default();
-
-        let fundamentals = self.yahoo.fundamentals(ticker, as_of).await.ok();
-
-        // Build peer returns from the same industry
-        let industry_name = universe
-            .all_slots()
-            .find(|s| s.ticker == ticker)
-            .map(|s| s.industry_name.as_str())
-            .unwrap_or("")
-            .to_string();
-
-        Ok(MarketData {
-            ticker: ticker.to_string(),
-            as_of,
-            industry_name,
-            price_bars,
-            fundamentals,
-            peer_returns_12m1m: HashMap::new(),
-            peer_fundamentals: HashMap::new(),
-            insider_trades: Vec::new(),
-            news_items: Vec::new(),
-            reddit_snapshots: Vec::new(),
-            macro_snapshot: MacroSnapshot::neutral(as_of),
-        })
-    }
-
-    async fn compute_forward_return(
-        &self,
-        ticker: &str,
-        date: NaiveDate,
-        forward_date: NaiveDate,
-    ) -> Result<f64> {
-        let bars = self.yahoo.price_history(ticker, date, forward_date).await?;
-
-        let price_start = bars
-            .first()
-            .map(|b| b.adj_close)
-            .filter(|&p| p > 0.0)
-            .ok_or_else(|| anyhow::anyhow!("no start price"))?;
-
-        let price_end = bars
-            .last()
-            .map(|b| b.adj_close)
-            .ok_or_else(|| anyhow::anyhow!("no end price"))?;
-
-        Ok((price_end - price_start) / price_start)
-    }
-
-    // ── Monte Carlo ───────────────────────────────────────────────────────────
-
-    async fn run_monte_carlo(
-        &self,
-        tickers: &[String],
-        test_start: NaiveDate,
-        test_end: NaiveDate,
-        ic_results: &[SignalIcResult],
-    ) -> Result<MonteCarloComparison> {
-        const N_SIMS: usize = 1_000;
-        const N_STOCKS: usize = 10;
-
-        // Compute actual top-10 composite strategy return over test period
-        // using IC-weighted signal selection
-        let strategy_return = self
-            .compute_strategy_return(tickers, test_start, test_end, N_STOCKS)
-            .await?;
-
-        let years = (test_end - test_start).num_days() as f64 / 365.25;
-        let strategy_annualised = (1.0 + strategy_return).powf(1.0 / years.max(1.0)) - 1.0;
-
-        // Compute returns for all individual tickers over the period
-        let ticker_returns = self.compute_all_returns(tickers, test_start, test_end).await;
-
-        // Monte Carlo: 1000 random 10-stock portfolios
-        let mut rng_state: u64 = 12345;
-        let mut sim_returns: Vec<f64> = Vec::with_capacity(N_SIMS);
-
-        let valid_tickers: Vec<&String> = ticker_returns.keys().collect();
-        if valid_tickers.len() < N_STOCKS {
-            return Ok(MonteCarloComparison {
-                strategy_annualised_return: strategy_annualised,
-                random_median_return: 0.0,
-                random_p5: 0.0,
-                random_p95: 0.0,
-                percentile_rank: 50.0,
-                n_simulations: 0,
-            });
-        }
-
-        for _ in 0..N_SIMS {
-            // Simple LCG random selection
-            let chosen = lcg_sample(&mut rng_state, &valid_tickers, N_STOCKS);
-            let avg_return = chosen
-                .iter()
-                .filter_map(|t| ticker_returns.get(*t))
-                .sum::<f64>()
-                / N_STOCKS as f64;
-            let annualised = (1.0 + avg_return).powf(1.0 / years.max(1.0)) - 1.0;
-            sim_returns.push(annualised);
-        }
-
-        sim_returns.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-
-        let median = percentile(&sim_returns, 50.0);
-        let p5     = percentile(&sim_returns, 5.0);
-        let p95    = percentile(&sim_returns, 95.0);
-        let beat   = sim_returns.iter().filter(|&&r| r < strategy_annualised).count();
-        let rank   = beat as f64 / sim_returns.len() as f64 * 100.0;
-
-        Ok(MonteCarloComparison {
-            strategy_annualised_return: strategy_annualised,
-            random_median_return: median,
-            random_p5: p5,
-            random_p95: p95,
-            percentile_rank: rank,
-            n_simulations: N_SIMS,
-        })
-    }
-
-    async fn compute_strategy_return(
-        &self,
-        tickers: &[String],
-        start: NaiveDate,
-        end: NaiveDate,
-        n: usize,
-    ) -> Result<f64> {
-        // Simple proxy: use 12-1m momentum at test_start to pick top-N
-        let price_from = start - Duration::days(400);
-        let mut momentum_scores: Vec<(String, f64)> = Vec::new();
-
-        for ticker in tickers {
-            if let Ok(bars) = self.yahoo.price_history(ticker, price_from, start).await {
-                if bars.len() >= 50 {
-                    let skip = 21.min(bars.len() / 10);
-                    let end_idx = bars.len().saturating_sub(skip + 1);
-                    let ret = (bars[end_idx].adj_close - bars[0].adj_close) / bars[0].adj_close.max(1e-9);
-                    momentum_scores.push((ticker.clone(), ret));
-                }
-            }
-        }
-
-        momentum_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        let top_n: Vec<String> = momentum_scores.into_iter().take(n).map(|(t, _)| t).collect();
-
-        let returns = self.compute_all_returns(&top_n, start, end).await;
-        let avg = returns.values().sum::<f64>() / returns.len().max(1) as f64;
-        Ok(avg)
-    }
-
-    async fn compute_all_returns(
-        &self,
-        tickers: &[String],
-        start: NaiveDate,
-        end: NaiveDate,
-    ) -> HashMap<String, f64> {
-        let mut out = HashMap::new();
-        for ticker in tickers {
-            if let Ok(bars) = self.yahoo.price_history(ticker, start, end).await {
-                if let (Some(first), Some(last)) = (bars.first(), bars.last()) {
-                    if first.adj_close > 0.0 {
-                        let ret = (last.adj_close - first.adj_close) / first.adj_close;
-                        out.insert(ticker.clone(), ret);
-                    }
-                }
-            }
-        }
-        out
+/// Turn a series of per-date ICs into a verdict.
+pub fn classify_ic(name: &str, ics: &[f64], unavailable_note: Option<&str>) -> SignalIcResult {
+    let s = ic::summarize(ics);
+    let evaluable = s.n >= MIN_DATES;
+    let has_edge = evaluable && s.mean > MIN_IC && s.t_stat > MIN_T;
+    let note = if evaluable {
+        None
+    } else {
+        Some(format!(
+            "not evaluable: {} test date(s) had >= {MIN_NAMES} names with this signal's data (need {MIN_DATES}){}",
+            s.n,
+            unavailable_note.map(|n| format!(". {n}")).unwrap_or_default(),
+        ))
+    };
+    SignalIcResult {
+        signal_name: name.to_string(),
+        ic_mean: s.mean,
+        ic_std: s.std,
+        n_dates: s.n,
+        has_edge,
+        t_stat: s.t_stat,
+        hit_rate: s.hit_rate,
+        evaluable,
+        note,
     }
 }
 
-// ── Statistical helpers ───────────────────────────────────────────────────────
-
-/// Pearson correlation coefficient between signal scores and forward returns.
-fn pearson_correlation(pairs: &[(f64, f64)]) -> f64 {
-    if pairs.len() < 2 {
-        return 0.0;
+/// Return earned by trading on the bar after `date`: enter at the next open,
+/// exit at the last close on/before `date + horizon`. `None` if either end is
+/// missing or the window is empty.
+pub fn forward_return(series: &PriceSeries, date: NaiveDate, horizon_days: i64) -> Option<f64> {
+    let entry = series.strictly_after(date)?;
+    let exit = series.on_or_before(date + Duration::days(horizon_days))?;
+    if exit.date <= entry.date {
+        return None;
     }
-    let n = pairs.len() as f64;
-    let xs: Vec<f64> = pairs.iter().map(|p| p.0).collect();
-    let ys: Vec<f64> = pairs.iter().map(|p| p.1).collect();
-    let mx = mean(&xs);
-    let my = mean(&ys);
-
-    let cov: f64 = pairs.iter().map(|(x, y)| (x - mx) * (y - my)).sum::<f64>() / n;
-    let sx = std_dev(&xs);
-    let sy = std_dev(&ys);
-
-    if sx < 1e-9 || sy < 1e-9 {
-        return 0.0;
-    }
-    (cov / (sx * sy)).clamp(-1.0, 1.0)
+    let px_in = entry.adj_open();
+    (px_in.is_finite() && px_in > 0.0).then(|| exit.adj_close / px_in - 1.0)
 }
 
-fn monthly_dates(start: NaiveDate, end: NaiveDate) -> Vec<NaiveDate> {
+/// `start`, then the first of each following month, through `end`.
+pub fn monthly_dates(start: NaiveDate, end: NaiveDate) -> Vec<NaiveDate> {
     let mut dates = Vec::new();
     let mut d = start;
     while d <= end {
         dates.push(d);
-        // Advance one month (first of next month approach)
-        let next_month = if d.month() == 12 {
+        let next = if d.month() == 12 {
             NaiveDate::from_ymd_opt(d.year() + 1, 1, 1)
         } else {
             NaiveDate::from_ymd_opt(d.year(), d.month() + 1, 1)
         };
-        match next_month {
-            Some(nm) => d = nm,
+        match next {
+            Some(n) => d = n,
             None => break,
         }
     }
     dates
+}
+
+/// Random portfolio returns: `n_sims` draws of `k` DISTINCT names, equal
+/// weight. (The previous sampler drew with replacement, so a "10-stock"
+/// portfolio could hold the same stock several times.)
+pub fn random_portfolio_returns(
+    returns: &[f64],
+    k: usize,
+    n_sims: usize,
+    seed: u64,
+) -> Vec<f64> {
+    let mut rng = StdRng::seed_from_u64(seed);
+    let mut out: Vec<f64> = (0..n_sims)
+        .map(|_| {
+            let picked: Vec<&f64> = returns.choose_multiple(&mut rng, k).collect();
+            picked.iter().map(|r| **r).sum::<f64>() / picked.len().max(1) as f64
+        })
+        .collect();
+    out.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    out
 }
 
 fn percentile(sorted: &[f64], p: f64) -> f64 {
@@ -436,14 +179,363 @@ fn percentile(sorted: &[f64], p: f64) -> f64 {
     sorted[idx.min(sorted.len() - 1)]
 }
 
-/// Minimal LCG-based random sampling (no `rand` dependency needed here).
-fn lcg_sample<'a, T>(state: &mut u64, items: &[&'a T], n: usize) -> Vec<&'a T> {
-    let mut selected = Vec::with_capacity(n);
-    let len = items.len();
-    for _ in 0..n {
-        *state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-        let idx = (*state >> 33) as usize % len;
-        selected.push(items[idx]);
+fn annualise(period_return: f64, years: f64) -> f64 {
+    // Annualising a sub-6-month return produces meaningless extremes.
+    if years >= 0.5 && period_return > -1.0 {
+        (1.0 + period_return).powf(1.0 / years) - 1.0
+    } else {
+        period_return
     }
-    selected
+}
+
+// ── Validator ─────────────────────────────────────────────────────────────────
+
+pub struct WalkForwardValidator {
+    cache: Cache,
+    yahoo: YahooFinance,
+}
+
+/// One ticker's inputs at one test date.
+struct Row {
+    data: MarketData,
+    availability: SignalAvailability,
+    fwd: Option<f64>,
+}
+
+impl WalkForwardValidator {
+    pub fn new(cache: Cache) -> Self {
+        let yahoo = YahooFinance::new(cache.clone());
+        Self { cache, yahoo }
+    }
+
+    pub async fn validate(
+        &self,
+        universe: &Universe,
+        train_end: NaiveDate,
+        test_start: NaiveDate,
+        test_end: NaiveDate,
+        run_monte_carlo: bool,
+    ) -> Result<ValidationReport> {
+        info!("Signal validation: {} → {} (nothing fitted; all out-of-sample)", test_start, test_end);
+
+        let mut slots: Vec<_> = universe.all_slots().collect();
+        slots.sort_by(|a, b| a.ticker.cmp(&b.ticker));
+        let test_dates = monthly_dates(test_start, test_end);
+
+        // Prices once, for the whole range plus lookback and forward window.
+        let mut prices = PriceStore::new();
+        for slot in &slots {
+            let bars = self
+                .yahoo
+                .price_history(
+                    &slot.ticker,
+                    test_start - Duration::days(400),
+                    test_end + Duration::days(HORIZON_DAYS + 10),
+                )
+                .await
+                .unwrap_or_default();
+            prices.insert(slot.ticker.clone(), PriceSeries::new(bars));
+        }
+
+        let signals: [(&str, &dyn Signal, fn(&SignalAvailability) -> bool, &str); 4] = [
+            ("Momentum", &MomentumSignal, |a| a.momentum, ""),
+            ("Fundamental", &FundamentalSignal, |a| a.fundamental,
+             "Point-in-time fundamentals exist for US issuers only (SEC filings)."),
+            ("Insider", &InsiderSignal, |a| a.insider,
+             "Insider history is only what the cache has collected; it builds up going forward."),
+            ("Sentiment", &SentimentSignal, |a| a.sentiment,
+             "GDELT/Reddit cannot be reconstructed for past dates; history builds up going forward."),
+        ];
+        let mut ic_series: Vec<Vec<f64>> = vec![Vec::new(); signals.len()];
+
+        for &date in &test_dates {
+            let rows = self.build_rows(&slots, &prices, date).await;
+            for (i, (_, signal, available, _)) in signals.iter().enumerate() {
+                let (mut xs, mut ys) = (Vec::new(), Vec::new());
+                for row in &rows {
+                    if !available(&row.availability) {
+                        continue; // no data for THIS signal: don't score it as neutral
+                    }
+                    if let Some(fwd) = row.fwd {
+                        xs.push(signal.compute(&row.data.ticker, &row.data));
+                        ys.push(fwd);
+                    }
+                }
+                if xs.len() >= MIN_NAMES {
+                    if let Some(v) = ic::spearman(&xs, &ys) {
+                        ic_series[i].push(v);
+                    }
+                }
+            }
+        }
+
+        let signal_ic: Vec<SignalIcResult> = signals
+            .iter()
+            .zip(&ic_series)
+            .map(|((name, _, _, note), series)| {
+                let r = classify_ic(name, series, (!note.is_empty()).then_some(*note));
+                info!(signal = %name, ic = %format!("{:.4}", r.ic_mean), t = %format!("{:.2}", r.t_stat),
+                      dates = r.n_dates, edge = r.has_edge, evaluable = r.evaluable, "IC computed");
+                r
+            })
+            .collect();
+
+        let monte_carlo = if run_monte_carlo {
+            self.run_monte_carlo(&prices, &slots, test_start, test_end)
+        } else {
+            None
+        };
+
+        Ok(ValidationReport {
+            generated_at: chrono::Local::now().to_rfc3339(),
+            train_period: ("(none - nothing is fitted)".to_string(), train_end.to_string()),
+            test_period: (test_start.to_string(), test_end.to_string()),
+            signal_ic,
+            monte_carlo,
+            notes: vec![
+                "Universe is today's ticker list: survivorship bias (delisted names are absent) flatters every result.".into(),
+                format!("Forward returns use a {HORIZON_DAYS}-day window sampled monthly; consecutive windows overlap slightly, so t-stats are indicative, not exact."),
+                "Rank (Spearman) IC. Entry at the next open after the test date, exit at the last close within the window.".into(),
+            ],
+        })
+    }
+
+    /// Point-in-time inputs for every ticker at `date`.
+    async fn build_rows(
+        &self,
+        slots: &[&crate::universe::builder::CompanySlot],
+        prices: &PriceStore,
+        date: NaiveDate,
+    ) -> Vec<Row> {
+        let view = AsOf::new(&self.cache, date);
+        let macro_snapshot = MacroSnapshot::neutral(date);
+
+        // Per-ticker bars/fundamentals first, so peers can be formed per industry.
+        struct Raw {
+            ticker: String,
+            industry: String,
+            bars: Vec<crate::data::PriceBar>,
+            fundamentals: Option<FundamentalSnapshot>,
+        }
+        let mut raws: Vec<Raw> = Vec::new();
+        for slot in slots {
+            let bars = prices
+                .get(&slot.ticker)
+                .map(|s| s.window(date - Duration::days(400), date).to_vec())
+                .unwrap_or_default();
+            let fundamentals = self.yahoo.fundamentals(&slot.ticker, date).await.ok();
+            raws.push(Raw {
+                ticker: slot.ticker.clone(),
+                industry: slot.industry_name.clone(),
+                bars,
+                fundamentals,
+            });
+        }
+
+        let mut peer_returns: HashMap<&str, HashMap<String, f64>> = HashMap::new();
+        let mut peer_funds: HashMap<&str, HashMap<String, FundamentalSnapshot>> = HashMap::new();
+        for r in &raws {
+            if let Some(m) = momentum_12m1m(&r.bars) {
+                peer_returns.entry(r.industry.as_str()).or_default().insert(r.ticker.clone(), m);
+            }
+            if let Some(f) = &r.fundamentals {
+                peer_funds.entry(r.industry.as_str()).or_default().insert(r.ticker.clone(), f.clone());
+            }
+        }
+
+        raws.iter()
+            .map(|r| {
+                let data = MarketData {
+                    ticker: r.ticker.clone(),
+                    as_of: date,
+                    industry_name: r.industry.clone(),
+                    price_bars: r.bars.clone(),
+                    fundamentals: r.fundamentals.clone(),
+                    peer_returns_12m1m: peer_returns.get(r.industry.as_str()).cloned().unwrap_or_default(),
+                    peer_fundamentals: peer_funds.get(r.industry.as_str()).cloned().unwrap_or_default(),
+                    insider_trades: view.insider_trades(&r.ticker, 90).unwrap_or_default(),
+                    news_items: view.news_items(&r.ticker, 30).unwrap_or_default(),
+                    reddit_snapshots: view.reddit_snapshots(&r.ticker, 7).unwrap_or_default(),
+                    macro_snapshot: macro_snapshot.clone(),
+                };
+                let availability = SignalAvailability::assess(&data, false);
+                let fwd = prices.get(&r.ticker).and_then(|s| forward_return(s, date, HORIZON_DAYS));
+                Row { data, availability, fwd }
+            })
+            .collect()
+    }
+
+    // ── Monte Carlo ───────────────────────────────────────────────────────────
+
+    /// Compare a simple, fully point-in-time strategy (top-10 by 12-1 momentum
+    /// at `test_start`, held to `test_end`) with random 10-name portfolios.
+    /// This is a momentum proxy, NOT the full composite — labelled as such.
+    fn run_monte_carlo(
+        &self,
+        prices: &PriceStore,
+        slots: &[&crate::universe::builder::CompanySlot],
+        test_start: NaiveDate,
+        test_end: NaiveDate,
+    ) -> Option<MonteCarloComparison> {
+        const N_SIMS: usize = 1_000;
+        const N_STOCKS: usize = 10;
+
+        // Buy-and-hold return of every name over the whole window.
+        let period_return = |t: &str| -> Option<f64> {
+            let s = prices.get(t)?;
+            let entry = s.strictly_after(test_start)?;
+            let exit = s.on_or_before(test_end)?;
+            let px = entry.adj_open();
+            (exit.date > entry.date && px > 0.0).then(|| exit.adj_close / px - 1.0)
+        };
+
+        let mut universe_returns: Vec<(String, f64)> = slots
+            .iter()
+            .filter_map(|s| period_return(&s.ticker).map(|r| (s.ticker.clone(), r)))
+            .collect();
+        universe_returns.sort_by(|a, b| a.0.cmp(&b.0));
+        if universe_returns.len() <= N_STOCKS {
+            return None;
+        }
+
+        // Strategy picks use only bars up to test_start.
+        let mut momentum: Vec<(String, f64)> = slots
+            .iter()
+            .filter_map(|s| {
+                let bars = prices.get(&s.ticker)?.window(test_start - Duration::days(400), test_start);
+                momentum_12m1m(bars).map(|m| (s.ticker.clone(), m))
+            })
+            .collect();
+        momentum.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal).then_with(|| a.0.cmp(&b.0)));
+        let picked: Vec<f64> = momentum
+            .iter()
+            .take(N_STOCKS)
+            .filter_map(|(t, _)| period_return(t))
+            .collect();
+        if picked.len() < N_STOCKS {
+            return None;
+        }
+        let strategy_return = picked.iter().sum::<f64>() / picked.len() as f64;
+
+        let all: Vec<f64> = universe_returns.iter().map(|(_, r)| *r).collect();
+        let sims = random_portfolio_returns(&all, N_STOCKS, N_SIMS, 12_345);
+
+        let years = (test_end - test_start).num_days() as f64 / 365.25;
+        let ann = |r: f64| annualise(r, years);
+        let beaten = sims.iter().filter(|&&r| r < strategy_return).count();
+
+        Some(MonteCarloComparison {
+            strategy_annualised_return: ann(strategy_return),
+            random_median_return: ann(percentile(&sims, 50.0)),
+            random_p5: ann(percentile(&sims, 5.0)),
+            random_p95: ann(percentile(&sims, 95.0)),
+            percentile_rank: beaten as f64 / sims.len() as f64 * 100.0,
+            n_simulations: N_SIMS,
+            strategy_description: format!(
+                "top-{N_STOCKS} by 12-1 month momentum at test start, buy & hold (a proxy, not the composite); returns {}",
+                if years >= 0.5 { "annualised" } else { "un-annualised (window < 6 months)" }
+            ),
+        })
+    }
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::data::prices::test_bar;
+
+    fn d(s: &str) -> NaiveDate {
+        s.parse().unwrap()
+    }
+
+    #[test]
+    fn a_signal_needs_history_before_it_can_be_judged() {
+        // Regression: empty inputs used to yield IC = 0 and a confident "no edge".
+        let r = classify_ic("Insider", &[], Some("history builds up going forward"));
+        assert!(!r.evaluable);
+        assert!(!r.has_edge);
+        assert!(r.note.as_deref().unwrap().contains("not evaluable"));
+        assert!(r.note.as_deref().unwrap().contains("going forward"));
+
+        let few = classify_ic("X", &[0.2, 0.3, 0.25], None);
+        assert!(!few.evaluable && !few.has_edge, "3 dates is not enough, however good");
+    }
+
+    #[test]
+    fn edge_requires_a_significant_positive_ic_not_just_a_threshold() {
+        // Consistently positive → edge.
+        let good = classify_ic("G", &[0.06, 0.05, 0.07, 0.04, 0.06, 0.05, 0.08], None);
+        assert!(good.evaluable && good.has_edge, "t={}", good.t_stat);
+
+        // Same mean but wildly noisy → not distinguishable from zero.
+        let noisy = classify_ic("N", &[0.5, -0.4, 0.45, -0.35, 0.4, -0.3, 0.3], None);
+        assert!(noisy.evaluable);
+        assert!(noisy.ic_mean > 0.02 && !noisy.has_edge, "noisy IC must not pass on its mean alone (t={})", noisy.t_stat);
+
+        // Significantly NEGATIVE is not an edge either.
+        let bad = classify_ic("B", &[-0.06, -0.05, -0.07, -0.04, -0.06, -0.05, -0.08], None);
+        assert!(!bad.has_edge);
+    }
+
+    #[test]
+    fn forward_return_enters_at_the_next_open_not_the_test_date_close() {
+        let mut bars = vec![
+            test_bar("2024-01-02", 100.0), // test date close
+            test_bar("2024-01-03", 100.0),
+            test_bar("2024-01-31", 130.0),
+        ];
+        bars[1].open = 110.0; // next-bar open
+        bars[1].close = 105.0;
+        bars[1].adj_close = 105.0; // keep the adjustment factor at 1
+        let s = PriceSeries::new(bars);
+        // Enter 110 (next open), exit 130 (last close within 30d of 1/2 → 2/1).
+        let r = forward_return(&s, d("2024-01-02"), 30).unwrap();
+        assert!((r - (130.0 / 110.0 - 1.0)).abs() < 1e-9, "{r}");
+    }
+
+    #[test]
+    fn forward_return_is_none_without_a_next_bar_or_a_window() {
+        let s = PriceSeries::new(vec![test_bar("2024-01-02", 100.0)]);
+        assert!(forward_return(&s, d("2024-01-02"), 30).is_none(), "no bar after the date");
+        let s2 = PriceSeries::new(vec![test_bar("2024-01-02", 100.0), test_bar("2024-06-01", 100.0)]);
+        // Entry 6/1 but the exit window ends 2/1 → exit precedes entry.
+        assert!(forward_return(&s2, d("2024-01-02"), 30).is_none());
+    }
+
+    #[test]
+    fn monthly_dates_start_then_first_of_each_month() {
+        assert_eq!(
+            monthly_dates(d("2023-11-15"), d("2024-02-10")),
+            vec![d("2023-11-15"), d("2023-12-01"), d("2024-01-01"), d("2024-02-01")]
+        );
+        assert_eq!(monthly_dates(d("2024-01-01"), d("2024-01-01")), vec![d("2024-01-01")]);
+    }
+
+    #[test]
+    fn random_portfolios_hold_distinct_names() {
+        // Universe of 10 names, portfolio of 10: with replacement the sample
+        // mean would vary; without replacement it is exactly the universe mean.
+        let returns: Vec<f64> = (0..10).map(|i| i as f64 / 10.0).collect();
+        let mean = returns.iter().sum::<f64>() / 10.0;
+        let sims = random_portfolio_returns(&returns, 10, 200, 3);
+        assert!(sims.iter().all(|s| (s - mean).abs() < 1e-12), "every draw must be the whole universe");
+    }
+
+    #[test]
+    fn random_portfolios_vary_and_are_reproducible() {
+        let returns: Vec<f64> = (0..40).map(|i| i as f64 / 40.0).collect();
+        let a = random_portfolio_returns(&returns, 10, 500, 9);
+        let b = random_portfolio_returns(&returns, 10, 500, 9);
+        assert_eq!(a, b);
+        assert!(percentile(&a, 95.0) > percentile(&a, 5.0));
+    }
+
+    #[test]
+    fn annualisation_only_for_windows_of_six_months_or_more() {
+        assert!((annualise(0.21, 2.0) - (1.21f64.sqrt() - 1.0)).abs() < 1e-12);
+        assert_eq!(annualise(0.10, 0.25), 0.10, "a 3-month return is not annualised");
+        assert_eq!(annualise(-1.5, 2.0), -1.5, "guard against invalid returns");
+    }
 }

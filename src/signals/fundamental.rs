@@ -13,7 +13,7 @@ impl Signal for FundamentalSignal {
         "Fundamental"
     }
 
-    fn compute(&self, ticker: &str, data: &MarketData) -> f64 {
+    fn compute(&self, _ticker: &str, data: &MarketData) -> f64 {
         let Some(fund) = &data.fundamentals else {
             return 0.0;
         };
@@ -82,45 +82,39 @@ impl Signal for FundamentalSignal {
     }
 }
 
-// ── Piotroski F-score proxy ───────────────────────────────────────────────────
-// Uses the 5 metrics we actually have from Yahoo fundamentals.
-// Each criterion contributes 1 point.
+// ── Full 9-point Piotroski F-score ────────────────────────────────────────────
+// Adapted to Yahoo Finance fields. Each criterion = 1 point.
+//
+// Profitability (4 pts):  ROA>0, CFO>0, net margin>0, gross margin quality
+// Leverage     (3 pts):  D/E<1, D/E<0.5, revenue scale (no-dilution proxy)
+// Efficiency   (2 pts):  revenue growth, price momentum / asset turnover proxy
 
 fn piotroski_proxy(fund: &FundamentalSnapshot) -> u8 {
     let mut score = 0u8;
 
-    // Profitability signals (up to 3 points)
-    if let Some(margin) = fund.net_margin_pct {
-        if margin > 0.0 { score += 1; }       // positive net income
-        if margin > 5.0 { score += 1; }       // healthy margin
-    }
-    if let Some(cagr) = fund.revenue_cagr_3yr {
-        if cagr > 0.05 { score += 1; }        // growing revenue
-    }
+    // Profitability —————————————————————————————————————————————————————————
+    // 1. Return on assets > 0
+    if fund.return_on_assets.map_or(false, |v| v > 0.0) { score += 1; }
+    // 2. Operating cash flow > 0
+    if fund.operating_cashflow.map_or(false, |v| v > 0.0) { score += 1; }
+    // 3. Positive net income (net margin > 0)
+    if fund.net_margin_pct.map_or(false, |v| v > 0.0) { score += 1; }
+    // 4. Accruals quality: gross margin > 25% signals earnings quality
+    if fund.gross_profit_margin.map_or(false, |v| v > 25.0) { score += 1; }
 
-    // Leverage / liquidity (up to 2 points)
-    if let Some(d2e) = fund.debt_to_equity {
-        if d2e < 100.0 { score += 1; }        // D/E < 1.0 (stored as %)
-        if d2e < 50.0  { score += 1; }        // D/E < 0.5
-    }
+    // Leverage / liquidity ————————————————————————————————————————————————
+    // 5. D/E < 1.0 (stored as percentage, so < 100)
+    if fund.debt_to_equity.map_or(false, |v| v < 100.0) { score += 1; }
+    // 6. D/E < 0.5 — conservatively financed
+    if fund.debt_to_equity.map_or(false, |v| v < 50.0)  { score += 1; }
+    // 7. Revenue scale > $1B — no-dilution / moat proxy
+    if fund.revenue_ttm.map_or(false, |v| v > 1_000_000_000.0) { score += 1; }
 
-    // Efficiency / value (up to 2 points)
-    if let Some(pb) = fund.price_to_book {
-        if pb > 0.0 && pb < 3.0 { score += 1; } // reasonable valuation
-    }
-    if let Some(rev) = fund.revenue_ttm {
-        if rev > 1_000_000_000.0 { score += 1; }  // scale/moat proxy
-    }
-
-    // Momentum proxy (1 point)
-    if let Some(ret) = fund.price_return_12m_1m {
-        if ret > 0.0 { score += 1; }
-    }
-
-    // Market share / operational strength (1 point)
-    if let Some(ms) = fund.market_share_proxy {
-        if ms > 0.05 { score += 1; } // > 5% industry revenue share
-    }
+    // Operating efficiency ————————————————————————————————————————————————
+    // 8. Revenue CAGR > 5% — improving asset turnover proxy
+    if fund.revenue_cagr_3yr.map_or(false, |v| v > 0.05) { score += 1; }
+    // 9. Positive price momentum — market confirmation of operational improvement
+    if fund.price_return_12m_1m.map_or(false, |v| v > 0.0) { score += 1; }
 
     score.min(9)
 }

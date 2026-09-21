@@ -1,0 +1,1092 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Quant Edge</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            bg:     '#0D0D0D',
+            panel:  '#141414',
+            border: '#1E1E1E',
+            cyan:   '#00E5FF',
+            green:  '#00FF88',
+            red:    '#FF4444',
+            amber:  '#FFB800',
+            muted:  '#555555',
+          },
+          fontFamily: { mono: ['"JetBrains Mono"', 'monospace'] },
+        }
+      }
+    };
+  </script>
+  <style>
+    * { font-family: 'JetBrains Mono', monospace; }
+    body { background: #0D0D0D; color: #E0E0E0; }
+    ::-webkit-scrollbar { width: 4px; height: 4px; }
+    ::-webkit-scrollbar-track { background: #141414; }
+    ::-webkit-scrollbar-thumb { background: #1E1E1E; border-radius: 2px; }
+    .tab-active { border-bottom: 2px solid #00E5FF; color: #00E5FF; }
+    .tab-inactive { color: #555555; border-bottom: 2px solid transparent; }
+    .tab-inactive:hover { color: #999999; }
+    .metric-card { background: #141414; border: 1px solid #1E1E1E; }
+    .ticker-link { cursor: pointer; }
+    .ticker-link:hover { color: #00E5FF; }
+    .spin { animation: spin 1s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .fade-in { animation: fadeIn 0.2s ease; }
+    @keyframes fadeIn { from { opacity:0; transform:translateY(4px); } to { opacity:1; transform:none; } }
+    table { border-collapse: collapse; width: 100%; }
+    th { color: #555555; font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; padding: 6px 8px; border-bottom: 1px solid #1E1E1E; text-align: left; }
+    td { padding: 5px 8px; border-bottom: 1px solid #161616; font-size: 12px; }
+    tr:hover td { background: #181818; }
+  </style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="importmap">
+{
+  "imports": {
+    "react":          "https://esm.sh/react@18",
+    "react-dom/client":"https://esm.sh/react-dom@18/client",
+    "recharts":       "https://esm.sh/recharts@2"
+  }
+}
+</script>
+
+<script type="module">
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { createRoot } from 'react-dom/client';
+import {
+  RadarChart, Radar, PolarGrid, PolarAngleAxis,
+  LineChart, Line, AreaChart, Area,
+  BarChart, Bar, XAxis, YAxis, CartesianGrid,
+  Tooltip, Legend, ResponsiveContainer,
+} from 'recharts';
+
+const API = '';  // same origin
+const cyan  = '#00E5FF';
+const green = '#00FF88';
+const red   = '#FF4444';
+const amber = '#FFB800';
+
+// ── Utilities ─────────────────────────────────────────────────────────────────
+
+const fmt  = (n, d=2) => n == null ? 'n/a' : (+n).toFixed(d);
+const fmtPct = n => n == null ? 'n/a' : `${(+n)>=0?'+':''}${(+n).toFixed(2)}%`;
+const fmtK = n => {
+  if (n == null) return 'n/a';
+  if (Math.abs(n) >= 1e9)  return `$${(n/1e9).toFixed(1)}B`;
+  if (Math.abs(n) >= 1e6)  return `$${(n/1e6).toFixed(1)}M`;
+  return `$${n.toFixed(0)}`;
+};
+const scoreColor = s =>
+  s >= 70 ? green : s >= 55 ? cyan : s >= 40 ? amber : red;
+
+async function api(path, opts={}) {
+  const r = await fetch(API + '/api' + path, {
+    headers: { 'Content-Type': 'application/json' },
+    ...opts
+  });
+  if (!r.ok) {
+    const err = await r.json().catch(() => ({ error: r.statusText }));
+    throw new Error(err.error || r.statusText);
+  }
+  return r.json();
+}
+
+// ── Spinner ───────────────────────────────────────────────────────────────────
+const Spinner = () => (
+  <span className="inline-block w-4 h-4 border-2 border-cyan/30 border-t-cyan rounded-full spin" />
+);
+
+// ── Badge ─────────────────────────────────────────────────────────────────────
+const RegimeBadge = ({ regime }) => (
+  <span className={`px-2 py-0.5 rounded text-xs font-bold ${
+    regime === 'Risk-On' ? 'bg-green/20 text-green' : 'bg-red/20 text-red'
+  }`}>{regime ?? '—'}</span>
+);
+
+// ── Score Badge ───────────────────────────────────────────────────────────────
+const ScoreBadge = ({ score }) => (
+  <span className="font-bold text-sm" style={{ color: scoreColor(score) }}>
+    {fmt(score, 1)}
+  </span>
+);
+
+// ── MetricCard ────────────────────────────────────────────────────────────────
+const MetricCard = ({ label, value, sub, color }) => (
+  <div className="metric-card rounded p-3 min-w-[120px]">
+    <div className="text-muted text-xs uppercase tracking-widest mb-1">{label}</div>
+    <div className="text-xl font-bold" style={{ color: color ?? '#E0E0E0' }}>{value}</div>
+    {sub && <div className="text-muted text-xs mt-0.5">{sub}</div>}
+  </div>
+);
+
+// ── Radar chart for signal breakdown ─────────────────────────────────────────
+const SignalRadar = ({ data }) => {
+  const rd = [
+    { axis: 'Momentum',    value: (data.momentum_raw + 1) * 50 },
+    { axis: 'Fundamental', value: (data.fundamental_raw + 1) * 50 },
+    { axis: 'Insider',     value: (data.insider_raw + 1) * 50 },
+    { axis: 'Sentiment',   value: (data.sentiment_raw + 1) * 50 },
+    { axis: 'Pairs',       value: (data.pairs_raw + 1) * 50 },
+  ];
+  return (
+    <ResponsiveContainer width="100%" height={200}>
+      <RadarChart data={rd}>
+        <PolarGrid stroke="#1E1E1E" />
+        <PolarAngleAxis dataKey="axis" tick={{ fill: '#555', fontSize: 10 }} />
+        <Radar dataKey="value" stroke={cyan} fill={cyan} fillOpacity={0.15} />
+      </RadarChart>
+    </ResponsiveContainer>
+  );
+};
+
+// ── Signal Detail Modal ───────────────────────────────────────────────────────
+const SignalModal = ({ ticker, onClose }) => {
+  const [data, setData]   = useState(null);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    if (!ticker) return;
+    api(`/signals/${ticker}`)
+      .then(setData)
+      .catch(e => setError(e.message));
+  }, [ticker]);
+
+  if (!ticker) return null;
+
+  return (
+    <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 p-4" onClick={onClose}>
+      <div className="bg-panel border border-border rounded-lg p-6 max-w-lg w-full fade-in" onClick={e => e.stopPropagation()}>
+        <div className="flex justify-between items-start mb-4">
+          <div>
+            <div className="text-cyan text-xl font-bold">{ticker}</div>
+            <div className="text-muted text-xs mt-1">{data?.date}</div>
+          </div>
+          {data && <ScoreBadge score={data.composite} />}
+          <button onClick={onClose} className="text-muted hover:text-white ml-4 text-lg">✕</button>
+        </div>
+
+        {error && <div className="text-red text-sm">{error}</div>}
+        {!data && !error && <div className="flex justify-center py-8"><Spinner /></div>}
+
+        {data && (
+          <>
+            <SignalRadar data={data} />
+            <div className="grid grid-cols-2 gap-2 mt-4 text-xs">
+              {[
+                ['Momentum',    fmt(data.momentum_raw, 3)],
+                ['Fundamental', fmt(data.fundamental_raw, 3)],
+                ['Insider',     fmt(data.insider_raw, 3)],
+                ['Sentiment',   fmt(data.sentiment_raw, 3)],
+                ['1M Return',   fmtPct(data.price_1m_pct)],
+                ['3M Return',   fmtPct(data.price_3m_pct)],
+                ['P/B',         fmt(data.fundamentals?.price_to_book)],
+                ['Net Margin',  fmt(data.fundamentals?.net_margin_pct) + '%'],
+                ['Rev CAGR 3Y', fmt(data.fundamentals?.revenue_cagr_3yr) + '%'],
+                ['D/E',         fmt(data.fundamentals?.debt_to_equity)],
+                ['Insider Trades', data.insider_count],
+                ['News Items',  data.news_count],
+                ['Reddit Mentions', data.reddit_mentions],
+                ['Macro On',    data.macro_on ? '✓' : '✗'],
+              ].map(([k, v]) => (
+                <div key={k} className="flex justify-between border-b border-border pb-1">
+                  <span className="text-muted">{k}</span>
+                  <span className="text-white">{v ?? 'n/a'}</span>
+                </div>
+              ))}
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+};
+
+// ── Picks Table ───────────────────────────────────────────────────────────────
+const PicksTable = ({ picks, onTickerClick }) => {
+  const [expanded, setExpanded] = useState(null);
+
+  if (!picks?.length) return <div className="text-muted text-sm py-4">No picks.</div>;
+
+  const downloadCSV = () => {
+    const header = 'Rank,Ticker,Score,Momentum,Fundamental,Insider,Sentiment,Pairs,Industry';
+    const rows = picks.map(p =>
+      `${p.rank},${p.ticker},${fmt(p.composite,1)},${fmt(p.momentum_raw,3)},${fmt(p.fundamental_raw,3)},${fmt(p.insider_raw,3)},${fmt(p.sentiment_raw,3)},${fmt(p.pairs_raw,3)},${p.industry}`
+    );
+    const blob = new Blob([[header, ...rows].join('\n')], { type: 'text/csv' });
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
+    a.download = 'picks.csv'; a.click();
+  };
+
+  return (
+    <div>
+      <div className="flex justify-end mb-2">
+        <button onClick={downloadCSV} className="text-xs text-cyan hover:text-white border border-cyan/30 rounded px-2 py-1">
+          ↓ Export CSV
+        </button>
+      </div>
+      <div className="overflow-x-auto">
+        <table>
+          <thead>
+            <tr>
+              <th>#</th><th>Ticker</th><th>Score</th>
+              <th>Mom</th><th>Fund</th><th>Insider</th><th>Sent</th><th>Pairs</th>
+              <th>Industry</th>
+            </tr>
+          </thead>
+          <tbody>
+            {picks.map(p => (
+              <React.Fragment key={p.ticker}>
+                <tr className="cursor-pointer" onClick={() => setExpanded(expanded === p.ticker ? null : p.ticker)}>
+                  <td className="text-muted">{p.rank}</td>
+                  <td className="ticker-link font-bold text-cyan" onClick={e => { e.stopPropagation(); onTickerClick(p.ticker); }}>
+                    {p.ticker}
+                  </td>
+                  <td><ScoreBadge score={p.composite} /></td>
+                  <td style={{ color: p.momentum_raw >= 0 ? green : red }}>{fmt(p.momentum_raw, 2)}</td>
+                  <td style={{ color: p.fundamental_raw >= 0 ? green : red }}>{fmt(p.fundamental_raw, 2)}</td>
+                  <td style={{ color: p.insider_raw >= 0 ? green : red }}>{fmt(p.insider_raw, 2)}</td>
+                  <td style={{ color: p.sentiment_raw >= 0 ? green : red }}>{fmt(p.sentiment_raw, 2)}</td>
+                  <td style={{ color: p.pairs_raw >= 0 ? green : red }}>{fmt(p.pairs_raw, 2)}</td>
+                  <td className="text-muted text-xs max-w-[160px] truncate">{p.industry}</td>
+                </tr>
+                {expanded === p.ticker && (
+                  <tr>
+                    <td colSpan={9} className="bg-panel">
+                      <div className="max-w-xs mx-auto py-2 fade-in">
+                        <SignalRadar data={p} />
+                      </div>
+                    </td>
+                  </tr>
+                )}
+              </React.Fragment>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+};
+
+// ════════════════════════════════════════════════════════════════════════════════
+// TAB 1 — Morning Briefing
+// ════════════════════════════════════════════════════════════════════════════════
+
+const MorningTab = ({ onTickerClick }) => {
+  const [data,    setData]    = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error,   setError]   = useState(null);
+  const timerRef = useRef(null);
+
+  const isMarketOpen = () => {
+    const now = new Date();
+    const et  = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour:'numeric', minute:'numeric', hour12:false }).format(now);
+    const [h, m] = et.split(':').map(Number);
+    const mins = h * 60 + m;
+    const day  = now.getDay();
+    return day >= 1 && day <= 5 && mins >= 9 * 60 + 30 && mins < 16 * 60;
+  };
+
+  const run = useCallback(async () => {
+    setLoading(true); setError(null);
+    try { setData(await api('/morning')); }
+    catch(e) { setError(e.message); }
+    finally { setLoading(false); }
+  }, []);
+
+  useEffect(() => {
+    const interval = parseInt(document.querySelector('meta[name=refresh]')?.content ?? '60', 10) * 1000;
+    if (timerRef.current) clearInterval(timerRef.current);
+    timerRef.current = setInterval(() => { if (isMarketOpen()) run(); }, interval);
+    return () => clearInterval(timerRef.current);
+  }, [run]);
+
+  return (
+    <div className="space-y-6 fade-in">
+      <div className="flex items-center gap-4 flex-wrap">
+        <button
+          onClick={run}
+          disabled={loading}
+          className="px-4 py-2 bg-cyan/10 border border-cyan/40 rounded text-cyan hover:bg-cyan/20 disabled:opacity-50 flex items-center gap-2 text-sm"
+        >
+          {loading ? <Spinner /> : '▶'} Run Morning Scan
+        </button>
+        {data && <RegimeBadge regime={data.regime} />}
+        {data && <span className="text-muted text-xs">{data.timestamp}</span>}
+      </div>
+
+      {error && <div className="text-red text-sm border border-red/30 bg-red/5 rounded p-3">{error}</div>}
+
+      {data && (
+        <>
+          {/* Macro Context */}
+          <div>
+            <div className="text-muted text-xs uppercase tracking-widest mb-3">Macro Context</div>
+            <div className="flex flex-wrap gap-3">
+              {data.macro_context?.indices?.map(idx => (
+                <MetricCard
+                  key={idx.label}
+                  label={idx.label}
+                  value={fmt(idx.price, 0)}
+                  sub={fmtPct(idx.change_5d) + ' 5d'}
+                  color={idx.change_5d >= 0 ? green : red}
+                />
+              ))}
+              <MetricCard label="VIX"      value={fmt(data.macro_context?.vix)}          color={data.macro_context?.vix > 25 ? red : green} />
+              <MetricCard label="10Y Yield" value={fmt(data.macro_context?.yield_10y) + '%'} />
+              <MetricCard label="USD/INR"  value={fmt(data.macro_context?.usdinr, 2)} />
+            </div>
+          </div>
+
+          {/* Paper Portfolio */}
+          {data.paper_portfolio && (
+            <div>
+              <div className="text-muted text-xs uppercase tracking-widest mb-3">Paper Portfolio</div>
+              <div className="flex flex-wrap gap-3">
+                <MetricCard label="Total Value" value={fmtK(data.paper_portfolio.total_value)} />
+                <MetricCard label="Total P&L"   value={fmtPct(data.paper_portfolio.total_pnl_pct)} color={data.paper_portfolio.total_pnl_pct >= 0 ? green : red} />
+                <MetricCard label="Positions"   value={data.paper_portfolio.positions} />
+                <MetricCard label="Next Rebal"  value={data.paper_portfolio.rebalance_due ? '⚠ DUE' : data.paper_portfolio.days_until_rebal + 'd'} color={data.paper_portfolio.rebalance_due ? amber : undefined} />
+              </div>
+            </div>
+          )}
+
+          {/* US Picks */}
+          <div>
+            <div className="text-muted text-xs uppercase tracking-widest mb-3">
+              US Picks <span className="text-white">({data.us_picks?.length})</span>
+            </div>
+            <PicksTable picks={data.us_picks} onTickerClick={onTickerClick} />
+          </div>
+
+          {/* IN Picks */}
+          <div>
+            <div className="text-muted text-xs uppercase tracking-widest mb-3">
+              NSE Picks <span className="text-white">({data.in_picks?.length})</span>
+            </div>
+            <PicksTable picks={data.in_picks} onTickerClick={onTickerClick} />
+          </div>
+        </>
+      )}
+    </div>
+  );
+};
+
+// ════════════════════════════════════════════════════════════════════════════════
+// TAB 2 — Strategy Playground
+// ════════════════════════════════════════════════════════════════════════════════
+
+const PlaygroundTab = ({ onTickerClick }) => {
+  const [presets,  setPresets]  = useState([]);
+  const [picks,    setPicks]    = useState(null);
+  const [strategy, setStrategy] = useState('');
+  const [loading,  setLoading]  = useState(false);
+  const [error,    setError]    = useState(null);
+  const [regime,   setRegime]   = useState(null);
+
+  useEffect(() => {
+    api('/strategies/presets').then(setPresets).catch(() => {});
+  }, []);
+
+  const runPreset = async (id) => {
+    setLoading(true); setError(null); setPicks(null);
+    try {
+      const r = await api('/strategies/run', { method: 'POST', body: JSON.stringify({ preset_id: id }) });
+      setPicks(r.picks); setRegime(r.regime);
+    } catch(e) { setError(e.message); }
+    finally { setLoading(false); }
+  };
+
+  const runCustom = async () => {
+    if (!strategy.trim()) return;
+    setLoading(true); setError(null); setPicks(null);
+    try {
+      const r = await api('/picks', { method: 'POST', body: JSON.stringify({ strategy }) });
+      setPicks(r.picks); setRegime(r.regime);
+    } catch(e) { setError(e.message); }
+    finally { setLoading(false); }
+  };
+
+  return (
+    <div className="fade-in">
+      <div className="flex gap-6 flex-col lg:flex-row">
+        {/* Preset cards */}
+        <div className="w-full lg:w-72 shrink-0">
+          <div className="text-muted text-xs uppercase tracking-widest mb-3">Preset Strategies</div>
+          <div className="space-y-2 max-h-[70vh] overflow-y-auto pr-1">
+            {presets.map(p => (
+              <div key={p.id} className="metric-card rounded p-3 cursor-pointer hover:border-cyan/40 transition-colors"
+                   onClick={() => runPreset(p.id)}>
+                <div className="flex items-center gap-2 mb-1">
+                  <span className="text-lg">{p.icon}</span>
+                  <span className="text-white text-sm font-semibold">{p.name}</span>
+                </div>
+                <div className="text-muted text-xs">{p.description}</div>
+                <button className="mt-2 text-xs text-cyan border border-cyan/30 rounded px-2 py-0.5 hover:bg-cyan/10">
+                  Run ▶
+                </button>
+              </div>
+            ))}
+          </div>
+
+          {/* Custom strategy */}
+          <div className="mt-4">
+            <div className="text-muted text-xs uppercase tracking-widest mb-2">Custom Strategy</div>
+            <textarea
+              value={strategy}
+              onChange={e => setStrategy(e.target.value)}
+              placeholder="Describe your strategy in plain English…"
+              className="w-full bg-panel border border-border rounded p-2 text-xs text-white resize-none h-24 focus:outline-none focus:border-cyan/50"
+            />
+            <button
+              onClick={runCustom}
+              disabled={loading || !strategy.trim()}
+              className="mt-2 w-full px-3 py-1.5 bg-cyan/10 border border-cyan/40 rounded text-cyan text-xs hover:bg-cyan/20 disabled:opacity-50 flex items-center justify-center gap-2"
+            >
+              {loading ? <Spinner /> : '🤖'} Parse &amp; Run (Gemini)
+            </button>
+          </div>
+        </div>
+
+        {/* Results */}
+        <div className="flex-1 min-w-0">
+          {loading && (
+            <div className="flex items-center gap-3 py-12 justify-center text-muted text-sm">
+              <Spinner /> Running picking engine…
+            </div>
+          )}
+          {error && <div className="text-red text-sm border border-red/30 bg-red/5 rounded p-3">{error}</div>}
+          {picks && !loading && (
+            <div className="fade-in">
+              <div className="flex items-center gap-3 mb-4">
+                <span className="text-white font-bold">{picks.length} picks</span>
+                {regime && <RegimeBadge regime={regime} />}
+              </div>
+              <PicksTable picks={picks} onTickerClick={onTickerClick} />
+            </div>
+          )}
+          {!picks && !loading && !error && (
+            <div className="text-muted text-sm py-12 text-center">
+              Select a preset or enter a custom strategy to see picks.
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// ════════════════════════════════════════════════════════════════════════════════
+// TAB 3 — Backtest Lab
+// ════════════════════════════════════════════════════════════════════════════════
+
+const BacktestTab = () => {
+  const [strategy,   setStrategy]   = useState('');
+  const [startDate,  setStartDate]  = useState('2020-01-01');
+  const [endDate,    setEndDate]    = useState('2024-01-01');
+  const [loading,    setLoading]    = useState(false);
+  const [error,      setError]      = useState(null);
+  const [results,    setResults]    = useState([]); // up to 3
+
+  const run = async () => {
+    if (!strategy.trim()) return;
+    setLoading(true); setError(null);
+    try {
+      const r = await api('/backtest', {
+        method: 'POST',
+        body: JSON.stringify({ strategy, start_date: startDate, end_date: endDate }),
+      });
+      setResults(prev => [r, ...prev].slice(0, 3));
+    } catch(e) { setError(e.message); }
+    finally { setLoading(false); }
+  };
+
+  const colors = [cyan, '#FF6B35', '#9B59B6'];
+
+  return (
+    <div className="space-y-6 fade-in">
+      {/* Form */}
+      <div className="metric-card rounded p-4 space-y-3">
+        <div className="text-muted text-xs uppercase tracking-widest">Backtest Configuration</div>
+        <div className="flex gap-3 flex-wrap items-end">
+          <div className="flex-1 min-w-[200px]">
+            <label className="text-muted text-xs block mb-1">Strategy (natural language)</label>
+            <input
+              value={strategy}
+              onChange={e => setStrategy(e.target.value)}
+              placeholder="e.g. High momentum tech stocks, ignore financials"
+              className="w-full bg-bg border border-border rounded px-3 py-1.5 text-sm text-white focus:outline-none focus:border-cyan/50"
+            />
+          </div>
+          <div>
+            <label className="text-muted text-xs block mb-1">Start</label>
+            <input type="date" value={startDate} onChange={e => setStartDate(e.target.value)}
+              className="bg-bg border border-border rounded px-2 py-1.5 text-sm text-white focus:outline-none focus:border-cyan/50" />
+          </div>
+          <div>
+            <label className="text-muted text-xs block mb-1">End</label>
+            <input type="date" value={endDate} onChange={e => setEndDate(e.target.value)}
+              className="bg-bg border border-border rounded px-2 py-1.5 text-sm text-white focus:outline-none focus:border-cyan/50" />
+          </div>
+          <button
+            onClick={run}
+            disabled={loading || !strategy.trim()}
+            className="px-4 py-1.5 bg-cyan/10 border border-cyan/40 rounded text-cyan text-sm hover:bg-cyan/20 disabled:opacity-50 flex items-center gap-2 whitespace-nowrap"
+          >
+            {loading ? <Spinner /> : '▶'} Run Backtest
+          </button>
+        </div>
+      </div>
+
+      {error && <div className="text-red text-sm border border-red/30 bg-red/5 rounded p-3">{error}</div>}
+
+      {/* Results side by side */}
+      {results.map((r, idx) => {
+        const res = r.result;
+        const eq  = res.daily_equity?.map(([date, value]) => ({ date, value })) ?? [];
+        const ic  = res.signal_ic_per_period ?? [];
+        const icData = ic.map((v, i) => ({ period: i + 1, ic: +v.toFixed(4) }));
+
+        return (
+          <div key={idx} className="metric-card rounded p-4 space-y-4 fade-in" style={{ borderColor: colors[idx] + '30' }}>
+            <div className="flex items-center gap-3">
+              <span className="w-3 h-3 rounded-full" style={{ background: colors[idx] }} />
+              <span className="font-bold text-white">{r.strategy_name}</span>
+              <span className="text-muted text-xs">IC mean: {fmt(r.ic_mean, 4)}</span>
+            </div>
+
+            {/* Metrics */}
+            <div className="flex flex-wrap gap-3">
+              <MetricCard label="Total Return"   value={fmtPct(res.total_return_pct)}     color={res.total_return_pct >= 0 ? green : red} />
+              <MetricCard label="Ann. Return"    value={fmtPct(res.annualised_return_pct)} color={res.annualised_return_pct >= 0 ? green : red} />
+              <MetricCard label="Sharpe"         value={fmt(res.sharpe_ratio)}             color={res.sharpe_ratio >= 1 ? green : res.sharpe_ratio >= 0 ? amber : red} />
+              <MetricCard label="Max Drawdown"   value={fmtPct(-res.max_drawdown_pct)}    color={red} />
+              <MetricCard label="Win Rate"       value={fmt(res.win_rate_pct, 1) + '%'} />
+              <MetricCard label="Final Value"    value={fmtK(res.final_value)} />
+            </div>
+
+            {/* Equity curve */}
+            {eq.length > 0 && (
+              <div>
+                <div className="text-muted text-xs mb-2">Equity Curve</div>
+                <ResponsiveContainer width="100%" height={180}>
+                  <AreaChart data={eq}>
+                    <CartesianGrid strokeDasharray="2 4" stroke="#1E1E1E" />
+                    <XAxis dataKey="date" tick={{ fill: '#555', fontSize: 9 }} tickLine={false} interval="preserveStartEnd" />
+                    <YAxis tick={{ fill: '#555', fontSize: 9 }} tickLine={false} tickFormatter={v => fmtK(v)} width={60} />
+                    <Tooltip formatter={v => fmtK(v)} contentStyle={{ background:'#141414', border:'1px solid #1E1E1E', color:'#E0E0E0', fontSize:11 }} />
+                    <Area type="monotone" dataKey="value" stroke={colors[idx]} fill={colors[idx]} fillOpacity={0.08} dot={false} strokeWidth={1.5} />
+                  </AreaChart>
+                </ResponsiveContainer>
+              </div>
+            )}
+
+            {/* IC per period */}
+            {icData.length > 0 && (
+              <div>
+                <div className="text-muted text-xs mb-2">Signal IC per Rebalance Period</div>
+                <ResponsiveContainer width="100%" height={100}>
+                  <BarChart data={icData}>
+                    <XAxis dataKey="period" tick={{ fill: '#555', fontSize: 9 }} />
+                    <YAxis tick={{ fill: '#555', fontSize: 9 }} domain={[-1, 1]} />
+                    <Tooltip contentStyle={{ background:'#141414', border:'1px solid #1E1E1E', color:'#E0E0E0', fontSize:11 }} />
+                    <Bar dataKey="ic" fill={colors[idx]} opacity={0.8} />
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            )}
+
+            {/* Trade log */}
+            {res.trades?.length > 0 && (
+              <details className="mt-2">
+                <summary className="text-muted text-xs cursor-pointer hover:text-white">
+                  Trade Log ({res.trades.length} trades)
+                </summary>
+                <div className="mt-2 max-h-48 overflow-y-auto">
+                  <table>
+                    <thead><tr><th>Date</th><th>Ticker</th><th>Side</th><th>Shares</th><th>Price</th></tr></thead>
+                    <tbody>
+                      {res.trades.map((t, i) => (
+                        <tr key={i}>
+                          <td className="text-muted">{t.date}</td>
+                          <td className="text-cyan">{t.ticker}</td>
+                          <td style={{ color: t.side === 'Buy' ? green : red }}>{t.side}</td>
+                          <td>{fmt(t.shares, 2)}</td>
+                          <td>{fmt(t.price, 2)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </details>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+};
+
+// ════════════════════════════════════════════════════════════════════════════════
+// TAB 4 — Paper Portfolio
+// ════════════════════════════════════════════════════════════════════════════════
+
+const PaperTab = () => {
+  const [status,   setStatus]   = useState(null);
+  const [history,  setHistory]  = useState([]);
+  const [loading,  setLoading]  = useState(false);
+  const [error,    setError]    = useState(null);
+  const [initStrat, setInitStrat] = useState('');
+  const [capital,  setCapital]  = useState('100000');
+
+  const loadStatus = useCallback(async () => {
+    try { setStatus(await api('/paper/status')); }
+    catch(e) { setError(e.message); }
+  }, []);
+
+  const loadHistory = useCallback(async () => {
+    try { const r = await api('/portfolio/history'); setHistory(r.history ?? []); }
+    catch {}
+  }, []);
+
+  useEffect(() => { loadStatus(); loadHistory(); }, []);
+
+  const initPortfolio = async () => {
+    setLoading(true); setError(null);
+    try {
+      await api('/paper/init', { method:'POST', body: JSON.stringify({ strategy: initStrat, capital: +capital }) });
+      await loadStatus(); await loadHistory();
+    } catch(e) { setError(e.message); }
+    finally { setLoading(false); }
+  };
+
+  const runEvening = async () => {
+    setLoading(true); setError(null);
+    try {
+      await api('/evening');
+      await loadStatus(); await loadHistory();
+    } catch(e) { setError(e.message); }
+    finally { setLoading(false); }
+  };
+
+  const portfolio = status?.portfolio;
+  const positions = portfolio ? Object.values(portfolio.positions) : [];
+  const sorted = [...positions].sort((a, b) => b.unrealised_pnl - a.unrealised_pnl);
+
+  return (
+    <div className="space-y-6 fade-in">
+      {error && <div className="text-red text-sm border border-red/30 bg-red/5 rounded p-3">{error}</div>}
+
+      {/* Summary */}
+      {status && (
+        <div className="flex flex-wrap gap-3">
+          <MetricCard label="Total Value"  value={fmtK(status.total_value)} />
+          <MetricCard label="Total P&L"   value={fmtPct(status.total_pnl_pct)}   color={status.total_pnl_pct >= 0 ? green : red} />
+          <MetricCard label="Cash %"      value={fmt(status.cash_pct, 1) + '%'} />
+          <MetricCard label="Positions"   value={status.positions_count} />
+          <MetricCard label="Next Rebal"  value={status.rebalance_due ? '⚠ DUE' : status.days_until_rebal + 'd'} color={status.rebalance_due ? amber : undefined} />
+        </div>
+      )}
+
+      {/* P&L history chart */}
+      {history.length > 0 && (
+        <div className="metric-card rounded p-4">
+          <div className="text-muted text-xs mb-2">30-Day Portfolio Value</div>
+          <ResponsiveContainer width="100%" height={160}>
+            <AreaChart data={history}>
+              <CartesianGrid strokeDasharray="2 4" stroke="#1E1E1E" />
+              <XAxis dataKey="date" tick={{ fill:'#555', fontSize:9 }} tickLine={false} interval="preserveStartEnd" />
+              <YAxis tick={{ fill:'#555', fontSize:9 }} tickFormatter={v => fmtK(v)} width={60} />
+              <Tooltip formatter={v => fmtK(v)} contentStyle={{ background:'#141414', border:'1px solid #1E1E1E', color:'#E0E0E0', fontSize:11 }} />
+              <Area type="monotone" dataKey="value" stroke={cyan} fill={cyan} fillOpacity={0.08} dot={false} strokeWidth={1.5} />
+            </AreaChart>
+          </ResponsiveContainer>
+        </div>
+      )}
+
+      {/* Holdings */}
+      {sorted.length > 0 && (
+        <div>
+          <div className="text-muted text-xs uppercase tracking-widest mb-3">Holdings</div>
+          <div className="overflow-x-auto">
+            <table>
+              <thead>
+                <tr><th>Ticker</th><th>Entry</th><th>Current</th><th>Shares</th><th>P&L%</th><th>Days</th></tr>
+              </thead>
+              <tbody>
+                {sorted.map(p => {
+                  const pnl = p.unrealised_pnl;
+                  const rowColor = pnl > 1 ? '#001a0a' : pnl < -1 ? '#1a0000' : '#0d0d0d';
+                  return (
+                    <tr key={p.ticker} style={{ background: rowColor }}>
+                      <td className="text-cyan font-bold">{p.ticker}</td>
+                      <td>{fmt(p.entry_price, 2)}</td>
+                      <td>{fmt(p.current_price, 2)}</td>
+                      <td>{fmt(p.shares, 2)}</td>
+                      <td style={{ color: pnl >= 0 ? green : red }}>{fmtPct(pnl)}</td>
+                      <td className="text-muted">{Math.floor((Date.now()/86400000) - (new Date(p.entry_date).getTime()/86400000))}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {/* Actions */}
+      <div className="metric-card rounded p-4 space-y-3">
+        <div className="text-muted text-xs uppercase tracking-widest">Initialize Portfolio</div>
+        <div className="flex gap-3 flex-wrap items-end">
+          <div className="flex-1 min-w-[200px]">
+            <label className="text-muted text-xs block mb-1">Strategy</label>
+            <input value={initStrat} onChange={e => setInitStrat(e.target.value)}
+              placeholder="e.g. Balanced multi-sector growth"
+              className="w-full bg-bg border border-border rounded px-3 py-1.5 text-sm text-white focus:outline-none focus:border-cyan/50" />
+          </div>
+          <div>
+            <label className="text-muted text-xs block mb-1">Capital</label>
+            <input type="number" value={capital} onChange={e => setCapital(e.target.value)}
+              className="w-28 bg-bg border border-border rounded px-2 py-1.5 text-sm text-white focus:outline-none focus:border-cyan/50" />
+          </div>
+          <button onClick={initPortfolio} disabled={loading || !initStrat.trim()}
+            className="px-4 py-1.5 bg-cyan/10 border border-cyan/40 rounded text-cyan text-sm hover:bg-cyan/20 disabled:opacity-50 flex items-center gap-2">
+            {loading ? <Spinner /> : '+'} Initialize
+          </button>
+          <button onClick={runEvening} disabled={loading}
+            className="px-4 py-1.5 bg-panel border border-border rounded text-white text-sm hover:border-cyan/40 disabled:opacity-50 flex items-center gap-2">
+            {loading ? <Spinner /> : '🌙'} Run Evening Update
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// ════════════════════════════════════════════════════════════════════════════════
+// TAB 5 — Universe Explorer
+// ════════════════════════════════════════════════════════════════════════════════
+
+const UniverseTab = ({ onTickerClick }) => {
+  const [data,     setData]    = useState(null);
+  const [loading,  setLoading] = useState(false);
+  const [error,    setError]   = useState(null);
+  const [search,   setSearch]  = useState('');
+  const [market,   setMarket]  = useState('all');
+  const [sortBy,   setSortBy]  = useState('composite');
+  const [sortDir,  setSortDir] = useState('desc');
+  const [minScore, setMinScore] = useState(0);
+
+  const load = async () => {
+    setLoading(true); setError(null);
+    try { setData(await api('/universe')); }
+    catch(e) { setError(e.message); }
+    finally { setLoading(false); }
+  };
+
+  const sortCol = col => {
+    if (sortBy === col) setSortDir(d => d === 'desc' ? 'asc' : 'desc');
+    else { setSortBy(col); setSortDir('desc'); }
+  };
+
+  const filtered = (data?.tickers ?? [])
+    .filter(t => {
+      if (market === 'us' && t.ticker.endsWith('.NS')) return false;
+      if (market === 'in' && !t.ticker.endsWith('.NS')) return false;
+      if (t.composite < minScore) return false;
+      if (search) {
+        const q = search.toLowerCase();
+        return t.ticker.toLowerCase().includes(q) || t.industry.toLowerCase().includes(q);
+      }
+      return true;
+    })
+    .sort((a, b) => {
+      const va = a[sortBy] ?? 0, vb = b[sortBy] ?? 0;
+      return sortDir === 'desc' ? vb - va : va - vb;
+    });
+
+  const SortTh = ({ col, label }) => (
+    <th className="cursor-pointer hover:text-white select-none" onClick={() => sortCol(col)}>
+      {label}{sortBy === col ? (sortDir === 'desc' ? ' ↓' : ' ↑') : ''}
+    </th>
+  );
+
+  return (
+    <div className="space-y-4 fade-in">
+      <div className="flex gap-3 flex-wrap items-end">
+        <button onClick={load} disabled={loading}
+          className="px-4 py-1.5 bg-cyan/10 border border-cyan/40 rounded text-cyan text-sm hover:bg-cyan/20 disabled:opacity-50 flex items-center gap-2">
+          {loading ? <Spinner /> : '↻'} Score Universe
+        </button>
+        <input value={search} onChange={e => setSearch(e.target.value)}
+          placeholder="Search ticker or industry…"
+          className="bg-panel border border-border rounded px-3 py-1.5 text-sm text-white focus:outline-none focus:border-cyan/50 w-48" />
+        <select value={market} onChange={e => setMarket(e.target.value)}
+          className="bg-panel border border-border rounded px-2 py-1.5 text-sm text-white focus:outline-none">
+          <option value="all">All Markets</option>
+          <option value="us">US / NYSE</option>
+          <option value="in">India / NSE</option>
+        </select>
+        <div className="flex items-center gap-2 text-xs text-muted">
+          Min Score:
+          <input type="range" min="0" max="100" value={minScore} onChange={e => setMinScore(+e.target.value)} className="w-24" />
+          <span className="text-white w-6">{minScore}</span>
+        </div>
+        {data && <span className="text-muted text-xs">{filtered.length}/{data.count} tickers</span>}
+      </div>
+
+      {error && <div className="text-red text-sm border border-red/30 bg-red/5 rounded p-3">{error}</div>}
+
+      {filtered.length > 0 && (
+        <div className="overflow-x-auto">
+          <table>
+            <thead>
+              <tr>
+                <SortTh col="rank"           label="#" />
+                <th>Ticker</th>
+                <SortTh col="composite"      label="Score" />
+                <SortTh col="momentum_raw"   label="Mom" />
+                <SortTh col="fundamental_raw" label="Fund" />
+                <SortTh col="insider_raw"    label="Insider" />
+                <SortTh col="sentiment_raw"  label="Sent" />
+                <SortTh col="pairs_raw"      label="Pairs" />
+                <th>Industry</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.map(t => (
+                <tr key={t.ticker}>
+                  <td className="text-muted">{t.rank}</td>
+                  <td className="ticker-link font-bold text-cyan" onClick={() => onTickerClick(t.ticker)}>{t.ticker}</td>
+                  <td><ScoreBadge score={t.composite} /></td>
+                  <td style={{ color: t.momentum_raw >= 0 ? green : red }}>{fmt(t.momentum_raw, 2)}</td>
+                  <td style={{ color: t.fundamental_raw >= 0 ? green : red }}>{fmt(t.fundamental_raw, 2)}</td>
+                  <td style={{ color: t.insider_raw >= 0 ? green : red }}>{fmt(t.insider_raw, 2)}</td>
+                  <td style={{ color: t.sentiment_raw >= 0 ? green : red }}>{fmt(t.sentiment_raw, 2)}</td>
+                  <td style={{ color: t.pairs_raw >= 0 ? green : red }}>{fmt(t.pairs_raw, 2)}</td>
+                  <td className="text-muted text-xs max-w-[160px] truncate">{t.industry}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {!data && !loading && (
+        <div className="text-muted text-sm py-12 text-center">
+          Click "Score Universe" to load and rank all tickers.
+        </div>
+      )}
+    </div>
+  );
+};
+
+// ════════════════════════════════════════════════════════════════════════════════
+// TAB 6 — Correlation Map
+// ════════════════════════════════════════════════════════════════════════════════
+
+const CorrelationTab = () => {
+  const [data,    setData]    = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error,   setError]   = useState(null);
+
+  const load = async () => {
+    setLoading(true); setError(null);
+    try { setData(await api('/correlations')); }
+    catch(e) { setError(e.message); }
+    finally { setLoading(false); }
+  };
+
+  const corrColor = r => {
+    const abs = Math.abs(r);
+    if (abs >= 0.8) return r > 0 ? '#FF2222' : '#2244FF';
+    if (abs >= 0.6) return r > 0 ? '#FF6644' : '#4466FF';
+    if (abs >= 0.4) return r > 0 ? '#FFAA55' : '#66AAFF';
+    return '#333333';
+  };
+
+  return (
+    <div className="space-y-6 fade-in">
+      <button onClick={load} disabled={loading}
+        className="px-4 py-1.5 bg-cyan/10 border border-cyan/40 rounded text-cyan text-sm hover:bg-cyan/20 disabled:opacity-50 flex items-center gap-2">
+        {loading ? <Spinner /> : '⊡'} Load Correlation Matrix
+      </button>
+
+      {error && <div className="text-red text-sm border border-red/30 bg-red/5 rounded p-3">{error}</div>}
+
+      {data && (
+        <>
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            {/* Top correlated */}
+            <div className="metric-card rounded p-4">
+              <div className="text-muted text-xs uppercase tracking-widest mb-3">Most Correlated Pairs</div>
+              <table>
+                <thead><tr><th>Industry A</th><th>Industry B</th><th>r</th></tr></thead>
+                <tbody>
+                  {data.top_correlated.map((p, i) => (
+                    <tr key={i}>
+                      <td className="text-xs max-w-[160px] truncate">{p.industry_a}</td>
+                      <td className="text-xs max-w-[160px] truncate">{p.industry_b}</td>
+                      <td style={{ color: corrColor(p.correlation) }} className="font-bold">
+                        {fmt(p.correlation, 3)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            {/* Least correlated */}
+            <div className="metric-card rounded p-4">
+              <div className="text-muted text-xs uppercase tracking-widest mb-3">Least Correlated (Diversification Ops)</div>
+              <table>
+                <thead><tr><th>Industry A</th><th>Industry B</th><th>r</th></tr></thead>
+                <tbody>
+                  {data.least_correlated.map((p, i) => (
+                    <tr key={i}>
+                      <td className="text-xs max-w-[160px] truncate">{p.industry_a}</td>
+                      <td className="text-xs max-w-[160px] truncate">{p.industry_b}</td>
+                      <td style={{ color: corrColor(p.correlation) }} className="font-bold">
+                        {fmt(p.correlation, 3)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          {/* All pairs heatmap (bar chart of top 30) */}
+          <div className="metric-card rounded p-4">
+            <div className="text-muted text-xs uppercase tracking-widest mb-3">Correlation Distribution (Top 30 Pairs by |r|)</div>
+            <ResponsiveContainer width="100%" height={220}>
+              <BarChart data={data.pairs.slice(0, 30).map(p => ({
+                name: `${p.industry_a.slice(0,12)}…${p.industry_b.slice(0,12)}`,
+                r: +p.correlation.toFixed(3),
+              }))}>
+                <CartesianGrid strokeDasharray="2 4" stroke="#1E1E1E" />
+                <XAxis dataKey="name" tick={false} />
+                <YAxis domain={[-1,1]} tick={{ fill:'#555', fontSize:9 }} />
+                <Tooltip contentStyle={{ background:'#141414', border:'1px solid #1E1E1E', color:'#E0E0E0', fontSize:10 }} />
+                <Bar dataKey="r" fill={cyan} opacity={0.7} />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        </>
+      )}
+    </div>
+  );
+};
+
+// ════════════════════════════════════════════════════════════════════════════════
+// Leaderboard sidebar
+// ════════════════════════════════════════════════════════════════════════════════
+
+const Leaderboard = () => {
+  const [runs, setRuns] = useState([]);
+
+  useEffect(() => {
+    api('/strategies/history').then(r => setRuns(r.runs ?? [])).catch(() => {});
+  }, []);
+
+  if (!runs.length) return null;
+
+  return (
+    <div className="metric-card rounded p-3">
+      <div className="text-muted text-xs uppercase tracking-widest mb-2">🏆 Leaderboard (Top Backtests by Sharpe)</div>
+      <table>
+        <thead><tr><th>#</th><th>Strategy</th><th>Sharpe</th><th>Return</th><th>MDD</th></tr></thead>
+        <tbody>
+          {runs.slice(0, 10).map((r, i) => (
+            <tr key={r.id}>
+              <td className="text-muted">{i+1}</td>
+              <td className="text-xs max-w-[140px] truncate">{r.strategy_name}</td>
+              <td style={{ color: r.sharpe >= 1 ? green : r.sharpe >= 0 ? amber : red }}>{fmt(r.sharpe, 2)}</td>
+              <td style={{ color: r.total_return >= 0 ? green : red }}>{fmtPct(r.total_return)}</td>
+              <td className="text-red">{fmtPct(-r.max_drawdown)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+};
+
+// ════════════════════════════════════════════════════════════════════════════════
+// App Shell
+// ════════════════════════════════════════════════════════════════════════════════
+
+const TABS = [
+  { id:'morning',     label:'Morning Briefing' },
+  { id:'playground',  label:'Strategy Playground' },
+  { id:'backtest',    label:'Backtest Lab' },
+  { id:'paper',       label:'Paper Portfolio' },
+  { id:'universe',    label:'Universe Explorer' },
+  { id:'correlations', label:'Correlation Map' },
+];
+
+function App() {
+  const [tab,       setTab]      = useState('morning');
+  const [modalTicker, setModal]  = useState(null);
+
+  return (
+    <div className="min-h-screen bg-bg text-white">
+      {/* Header */}
+      <header className="border-b border-border px-6 py-3 flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <span className="text-cyan font-bold text-lg tracking-tight">QUANT EDGE</span>
+          <span className="text-muted text-xs">/ multi-signal stock engine</span>
+        </div>
+        <div className="text-muted text-xs">{new Date().toISOString().slice(0,10)}</div>
+      </header>
+
+      {/* Tabs */}
+      <nav className="border-b border-border px-6 flex gap-6 overflow-x-auto">
+        {TABS.map(t => (
+          <button
+            key={t.id}
+            onClick={() => setTab(t.id)}
+            className={`py-3 text-sm whitespace-nowrap transition-colors ${tab === t.id ? 'tab-active' : 'tab-inactive'}`}
+          >
+            {t.label}
+          </button>
+        ))}
+      </nav>
+
+      {/* Content */}
+      <div className="flex gap-6 p-6">
+        <main className="flex-1 min-w-0">
+          {tab === 'morning'      && <MorningTab     onTickerClick={setModal} />}
+          {tab === 'playground'   && <PlaygroundTab  onTickerClick={setModal} />}
+          {tab === 'backtest'     && <BacktestTab />}
+          {tab === 'paper'        && <PaperTab />}
+          {tab === 'universe'     && <UniverseTab    onTickerClick={setModal} />}
+          {tab === 'correlations' && <CorrelationTab />}
+        </main>
+
+        {/* Leaderboard sidebar */}
+        <aside className="hidden xl:block w-72 shrink-0">
+          <Leaderboard />
+        </aside>
+      </div>
+
+      {/* Signal modal */}
+      <SignalModal ticker={modalTicker} onClose={() => setModal(null)} />
+    </div>
+  );
+}
+
+createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>

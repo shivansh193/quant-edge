@@ -10,6 +10,12 @@ use crate::signals::SignalScore;
 /// Returns all picks with score ≥ threshold, clamped to [5, 30].
 /// If fewer than 5 clear the threshold, fall back to top-5 by score.
 pub fn score_based_picks(scores: &[SignalScore], threshold: f64) -> Vec<SignalScore> {
+    // Risk-off: hold cash. Without this the "fall back to top-5" rule below
+    // would keep recommending longs precisely when the macro gate says not to.
+    if scores.iter().any(|s| !s.macro_on) {
+        return Vec::new();
+    }
+
     let filtered: Vec<SignalScore> = scores
         .iter()
         .filter(|s| s.composite >= threshold)

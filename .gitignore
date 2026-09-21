@@ -26,3 +26,19 @@ Thumbs.db
 *.prof
 flamegraph.svg
 perf.data
+
+# Frontend build output & dependencies
+node_modules/
+.next/
+out/
+*.tsbuildinfo
+
+# SQLite sidecar files (the .db itself is already ignored)
+*.db-shm
+*.db-wal
+
+# Claude Code worktrees (local scratch)
+.claude/worktrees/
+
+# NOTE: forward_log/ is deliberately NOT ignored - commit it, so git
+# timestamps each day's picks externally.

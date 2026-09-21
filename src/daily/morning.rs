@@ -52,6 +52,10 @@ pub async fn run_morning(cache: Cache, taxonomy: &GicsTaxonomy, today: NaiveDate
     // ── 3. Score-based top-N selection ────────────────────────────────────────
     let picks = score_based_picks(&scores, threshold);
 
+    // Record what we recommended BEFORE any outcome is known (tamper-evident;
+    // see forward_test). Never fails the report.
+    crate::forward_test::record_best_effort(&cache, today, "morning: default composite", &scores, &picks);
+
     let nse_picks: Vec<SignalScore> = picks
         .iter()
         .filter(|s| s.ticker.ends_with(".NS"))

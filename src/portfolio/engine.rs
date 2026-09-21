@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tracing::info;
 
+use crate::data::prices::PriceSeries;
 use crate::data::source::DataSource;
 use crate::roles::classifier::{IndustryRoster, Role};
 use crate::universe::builder::Universe;
@@ -22,23 +23,44 @@ pub enum RebalanceFrequency {
 }
 
 impl RebalanceFrequency {
-    /// Returns true if `date` is a rebalance checkpoint given this frequency.
-    pub fn is_checkpoint(&self, date: NaiveDate, start: NaiveDate) -> bool {
+    /// Calendar dates on which a rebalance is *due* after `start`, up to `end`.
+    ///
+    /// Each target is computed from `start` (never cumulatively, so month-end
+    /// starts do not drift) and clamped to the month's last day. A target that
+    /// lands on a weekend/holiday is honoured by the caller on the next trading
+    /// day. The old day-of-month equality check silently skipped any rebalance
+    /// whose day did not exist or fell on a weekend.
+    pub fn checkpoints(&self, start: NaiveDate, end: NaiveDate) -> Vec<NaiveDate> {
+        use chrono::Months;
+        let mut out = Vec::new();
         match self {
-            RebalanceFrequency::Daily     => true,
-            RebalanceFrequency::Weekly    => date.weekday() == start.weekday(),
-            RebalanceFrequency::Monthly   => date.day() == start.day(),
-            RebalanceFrequency::Quarterly => {
-                date.day() == start.day()
-                    && (date.month() == start.month()
-                        || date.month() == (start.month() + 2) % 12 + 1
-                        || date.month() == (start.month() + 5) % 12 + 1
-                        || date.month() == (start.month() + 8) % 12 + 1)
+            RebalanceFrequency::Daily | RebalanceFrequency::Weekly => {
+                let step = if matches!(self, RebalanceFrequency::Daily) { 1 } else { 7 };
+                let mut d = start + chrono::Duration::days(step);
+                while d <= end {
+                    out.push(d);
+                    d += chrono::Duration::days(step);
+                }
             }
-            RebalanceFrequency::Annual    => {
-                date.day() == start.day() && date.month() == start.month()
+            RebalanceFrequency::Monthly
+            | RebalanceFrequency::Quarterly
+            | RebalanceFrequency::Annual => {
+                let months = match self {
+                    RebalanceFrequency::Monthly => 1,
+                    RebalanceFrequency::Quarterly => 3,
+                    _ => 12,
+                };
+                let mut k = 1u32;
+                while let Some(d) = start.checked_add_months(Months::new(months * k)) {
+                    if d > end {
+                        break;
+                    }
+                    out.push(d);
+                    k += 1;
+                }
             }
         }
+        out
     }
 }
 
@@ -51,6 +73,8 @@ pub struct SimulationConfig {
     pub weight_mode:     WeightMode,
     pub active_roles:    Vec<Role>,
     pub benchmark_ticker: String,   // e.g. "^NSEI" or "^GSPC"
+    /// One-way cost applied to traded notional at each (re)allocation, in bps.
+    pub transaction_cost_bps: f64,
 }
 
 // ── Result types ──────────────────────────────────────────────────────────────
@@ -88,6 +112,9 @@ pub struct SimulationResult {
     pub role_performance:   Vec<RolePerformance>,
     pub industry_perf:      Vec<IndustryPerformance>,
     pub config:             SimulationConfig,
+    /// Buy-and-hold total return of *every* universe ticker over the window —
+    /// the population the Monte Carlo baseline samples from.
+    pub universe_returns:   HashMap<String, f64>,
 }
 
 impl SimulationResult {
@@ -149,10 +176,12 @@ impl<'a> SimulationEngine<'a> {
             .await
             .context("Benchmark price fetch failed")?;
 
-        let benchmark_map: HashMap<NaiveDate, f64> = benchmark_bars
-            .iter()
-            .map(|b| (b.date, b.adj_close))
-            .collect();
+        let benchmark = PriceSeries::new(benchmark_bars);
+        anyhow::ensure!(
+            !benchmark.is_empty(),
+            "No benchmark price data for {} in the window",
+            cfg.benchmark_ticker
+        );
 
         // ── Initial classification ────────────────────────────────────────────
 
@@ -172,22 +201,37 @@ impl<'a> SimulationEngine<'a> {
 
         // ── Holdings: ticker → number of shares ──────────────────────────────
 
-        let mut holdings: HashMap<String, f64> =
-            self.allocate(&current_weights, cfg.initial_capital, &price_data, cfg.start_date);
+        // The initial purchase is turnover too: pay the cost on the full amount.
+        let initial_cost = cfg.initial_capital * cfg.transaction_cost_bps / 10_000.0;
+        let mut holdings: HashMap<String, f64> = self.allocate(
+            &current_weights,
+            cfg.initial_capital - initial_cost,
+            &price_data,
+            cfg.start_date,
+        );
 
         // ── Tracking structures ───────────────────────────────────────────────
 
         let mut snapshots:       Vec<PortfolioSnapshot>            = Vec::new();
         let mut role_swap_count: HashMap<Role, usize>              = HashMap::new();
         let mut role_weight_sum: HashMap<Role, f64>                = HashMap::new();
-        let mut role_return_sum: HashMap<Role, f64>                = HashMap::new();
-        let mut industry_returns: HashMap<u32, (String, f64, f64)> = HashMap::new();
+        let _role_return_sum: HashMap<Role, f64>                = HashMap::new();
+        let _industry_returns: HashMap<u32, (String, f64, f64)> = HashMap::new();
         // industry_code → (name, start_value, current_value)
 
-        let benchmark_start = benchmark_map
-            .get(&cfg.start_date)
-            .copied()
-            .unwrap_or(1.0);
+        // First benchmark close on/after the start. (The old code fell back to
+        // 1.0 when the start date was not a trading day, which made the
+        // benchmark line — and therefore alpha — nonsense.)
+        let benchmark_start = benchmark
+            .on_or_before(cfg.start_date)
+            .or_else(|| benchmark.strictly_after(cfg.start_date))
+            .map(|b| b.adj_close)
+            .filter(|p| *p > 0.0)
+            .context("Benchmark has no usable start price")?;
+
+        // Rebalances due after the start, on the calendar (see `checkpoints`).
+        let checkpoints = cfg.rebalance_freq.checkpoints(cfg.start_date, cfg.end_date);
+        let mut next_checkpoint = 0usize;
 
         // ── Day loop ──────────────────────────────────────────────────────────
 
@@ -200,8 +244,14 @@ impl<'a> SimulationEngine<'a> {
                 continue;
             }
 
-            // Rebalance if this is a checkpoint (and not the very first day)
-            if date > cfg.start_date && cfg.rebalance_freq.is_checkpoint(date, cfg.start_date) {
+            // A checkpoint is due once we reach (or pass) its calendar date.
+            let mut rebalance_due = false;
+            while next_checkpoint < checkpoints.len() && checkpoints[next_checkpoint] <= date {
+                rebalance_due = true;
+                next_checkpoint += 1;
+            }
+
+            if date > cfg.start_date && rebalance_due {
                 let result = rebalancer
                     .rebalance(universe, date, &current_rosters)
                     .await?;
@@ -215,15 +265,17 @@ impl<'a> SimulationEngine<'a> {
                 current_rosters = result.rosters;
                 current_weights = result.weights;
 
-                // Re-allocate holdings at new weights using current portfolio value
+                // Re-allocate holdings at new weights using current portfolio
+                // value, net of the cost of the turnover this implies.
                 let portfolio_value =
                     self.compute_portfolio_value(&holdings, &price_data, date);
-                holdings = self.allocate(
-                    &current_weights,
-                    portfolio_value,
-                    &price_data,
-                    date,
-                );
+                let target = self.allocate(&current_weights, portfolio_value, &price_data, date);
+                let cost = self.turnover_cost(&holdings, &target, &price_data, date);
+                holdings = if cost > 0.0 && portfolio_value > cost {
+                    self.allocate(&current_weights, portfolio_value - cost, &price_data, date)
+                } else {
+                    target
+                };
             }
 
             // ── Compute portfolio value for today ─────────────────────────────
@@ -231,10 +283,10 @@ impl<'a> SimulationEngine<'a> {
             let portfolio_value =
                 self.compute_portfolio_value(&holdings, &price_data, date);
 
-            let benchmark_price = benchmark_map.get(&date).copied().unwrap_or_else(|| {
-                // Forward-fill: find most recent benchmark price
-                self.last_known_price(&benchmark_bars, date)
-            });
+            // Forward-fill from the most recent benchmark close.
+            let benchmark_price = benchmark
+                .on_or_before(date)
+                .map_or(benchmark_start, |b| b.adj_close);
 
             let benchmark_value =
                 (benchmark_price / benchmark_start) * cfg.initial_capital;
@@ -293,12 +345,15 @@ impl<'a> SimulationEngine<'a> {
             snapshots.last().map(|s| s.portfolio_value).unwrap_or(0.0)
         );
 
+        let universe_returns = universe_buy_and_hold_returns(&price_data);
+
         Ok(SimulationResult {
             snapshots,
             swap_log: all_swaps,
             role_performance,
             industry_perf,
             config: self.config.clone(),
+            universe_returns,
         })
     }
 
@@ -381,12 +436,28 @@ impl<'a> SimulationEngine<'a> {
         None
     }
 
-    fn last_known_price(&self, bars: &[crate::data::source::PriceBar], date: NaiveDate) -> f64 {
-        bars.iter()
-            .filter(|b| b.date <= date)
-            .last()
-            .map(|b| b.adj_close)
-            .unwrap_or(1.0)
+    /// Cost of moving from `old` share counts to `new` share counts:
+    /// `transaction_cost_bps` × Σ |Δ value| across every ticker touched.
+    fn turnover_cost(
+        &self,
+        old: &HashMap<String, f64>,
+        new: &HashMap<String, f64>,
+        price_data: &HashMap<String, HashMap<NaiveDate, f64>>,
+        date: NaiveDate,
+    ) -> f64 {
+        if self.config.transaction_cost_bps <= 0.0 {
+            return 0.0;
+        }
+        let tickers: std::collections::HashSet<&String> = old.keys().chain(new.keys()).collect();
+        let traded: f64 = tickers
+            .into_iter()
+            .map(|t| {
+                let px = self.last_known_ticker_price(price_data, t, date).unwrap_or(0.0);
+                let d_shares = new.get(t).copied().unwrap_or(0.0) - old.get(t).copied().unwrap_or(0.0);
+                (d_shares * px).abs()
+            })
+            .sum();
+        traded * self.config.transaction_cost_bps / 10_000.0
     }
 
     // ── Analytics helpers ─────────────────────────────────────────────────────
@@ -495,9 +566,73 @@ impl<'a> SimulationEngine<'a> {
     }
 }
 
+/// Buy-and-hold total return of each ticker between its first and last price
+/// in the window. This is the population the Monte Carlo baseline samples.
+fn universe_buy_and_hold_returns(
+    price_data: &HashMap<String, HashMap<NaiveDate, f64>>,
+) -> HashMap<String, f64> {
+    price_data
+        .iter()
+        .filter_map(|(ticker, prices)| {
+            let first = prices.iter().min_by_key(|(d, _)| **d)?.1;
+            let last = prices.iter().max_by_key(|(d, _)| **d)?.1;
+            (*first > 0.0 && last.is_finite()).then(|| (ticker.clone(), last / first - 1.0))
+        })
+        .collect()
+}
+
 // ── Calendar helpers ──────────────────────────────────────────────────────────
 
 fn is_weekend(date: NaiveDate) -> bool {
     use chrono::Weekday;
     matches!(date.weekday(), Weekday::Sat | Weekday::Sun)
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn d(s: &str) -> NaiveDate {
+        s.parse().unwrap()
+    }
+
+    #[test]
+    fn monthly_checkpoints_do_not_drift_from_a_month_end_start() {
+        // Regression: `date.day() == start.day()` never matched Feb/Apr/Jun...
+        let cps = RebalanceFrequency::Monthly.checkpoints(d("2024-01-31"), d("2024-06-30"));
+        assert_eq!(
+            cps,
+            vec![d("2024-02-29"), d("2024-03-31"), d("2024-04-30"), d("2024-05-31"), d("2024-06-30")]
+        );
+    }
+
+    #[test]
+    fn quarterly_and_annual_checkpoints() {
+        let q = RebalanceFrequency::Quarterly.checkpoints(d("2024-01-15"), d("2025-01-15"));
+        assert_eq!(q, vec![d("2024-04-15"), d("2024-07-15"), d("2024-10-15"), d("2025-01-15")]);
+        let a = RebalanceFrequency::Annual.checkpoints(d("2024-02-29"), d("2027-03-01"));
+        assert_eq!(a, vec![d("2025-02-28"), d("2026-02-28"), d("2027-02-28")]);
+    }
+
+    #[test]
+    fn weekly_and_daily_checkpoints() {
+        let w = RebalanceFrequency::Weekly.checkpoints(d("2024-01-01"), d("2024-01-22"));
+        assert_eq!(w, vec![d("2024-01-08"), d("2024-01-15"), d("2024-01-22")]);
+        let dly = RebalanceFrequency::Daily.checkpoints(d("2024-01-01"), d("2024-01-03"));
+        assert_eq!(dly, vec![d("2024-01-02"), d("2024-01-03")]);
+    }
+
+    #[test]
+    fn checkpoints_empty_when_window_is_shorter_than_the_period() {
+        assert!(RebalanceFrequency::Annual.checkpoints(d("2024-01-01"), d("2024-06-01")).is_empty());
+    }
+
+    #[test]
+    fn buy_and_hold_returns_use_first_and_last_price() {
+        let mut m: HashMap<String, HashMap<NaiveDate, f64>> = HashMap::new();
+        m.insert("A".into(), [(d("2024-01-02"), 100.0), (d("2024-01-05"), 150.0), (d("2024-01-03"), 90.0)].into_iter().collect());
+        m.insert("BAD".into(), [(d("2024-01-02"), 0.0), (d("2024-01-05"), 5.0)].into_iter().collect());
+        let r = universe_buy_and_hold_returns(&m);
+        assert!((r["A"] - 0.5).abs() < 1e-12);
+        assert!(!r.contains_key("BAD"), "zero start price must be excluded");
+    }
 }

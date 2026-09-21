@@ -12,14 +12,21 @@ use crate::llm::StrategySpec;
 use crate::universe::builder::Universe;
 
 use super::{
-    composite_score,
+    composite_score, sort_and_rank,
     fundamental::FundamentalSignal,
     insider::InsiderSignal,
     macro_filter::MacroFilter,
     momentum::MomentumSignal,
     sentiment::SentimentSignal,
-    MarketData, Signal, SignalScore, SignalWeights,
+    MarketData, Ranker, Signal, SignalAvailability, SignalScore, SignalWeights,
 };
+
+#[async_trait::async_trait]
+impl Ranker for PickingEngine {
+    async fn rank(&self, universe: &Universe, as_of: NaiveDate) -> Result<Vec<SignalScore>> {
+        self.rank_universe(universe, as_of).await
+    }
+}
 
 // ── PickingEngine ─────────────────────────────────────────────────────────────
 
@@ -124,7 +131,13 @@ impl PickingEngine {
 
         let mut scores: Vec<SignalScore> = Vec::new();
 
-        for (industry_code, slots) in &universe.by_industry {
+        // Iterate industries in a fixed order: HashMap order is random, which
+        // would make identical runs produce different rankings on ties.
+        let mut industry_codes: Vec<&u32> = universe.by_industry.keys().collect();
+        industry_codes.sort_unstable();
+
+        for industry_code in industry_codes {
+            let slots = &universe.by_industry[industry_code];
             if slots.is_empty() {
                 continue;
             }
@@ -170,39 +183,29 @@ impl PickingEngine {
                     .await
                 {
                     Ok(data) => {
-                        let score = self.score(&data, pairs_signal.as_ref());
-                        scores.push(score);
+                        if !passes_liquidity_filter(ticker, &data.price_bars) {
+                            warn!(ticker = %ticker, "Dropped — insufficient liquidity");
+                            continue;
+                        }
+                        match self.score(&data, pairs_signal.as_ref()) {
+                            Some(score) => scores.push(score),
+                            None => warn!(
+                                ticker = %ticker,
+                                "Dropped — no signal had usable data (not scoring on nothing)"
+                            ),
+                        }
                     }
                     Err(e) => {
-                        warn!(ticker = %ticker, "MarketData gather failed: {:#}", e);
-                        // Push a zero-score entry so the ticker still appears
-                        scores.push(SignalScore {
-                            rank: 0,
-                            ticker: ticker.clone(),
-                            industry: industry_name.to_string(),
-                            composite: 50.0,
-                            momentum_raw: 0.0,
-                            fundamental_raw: 0.0,
-                            insider_raw: 0.0,
-                            sentiment_raw: 0.0,
-                            pairs_raw: 0.0,
-                            momentum_contrib: 50.0,
-                            fundamental_contrib: 50.0,
-                            insider_contrib: 50.0,
-                            sentiment_contrib: 50.0,
-                            pairs_contrib: 50.0,
-                            macro_on,
-                        });
+                        // Previously this fabricated a neutral 50 that could still be
+                        // picked. A ticker we cannot evaluate must not be held.
+                        warn!(ticker = %ticker, "MarketData gather failed, skipping: {:#}", e);
                     }
                 }
             }
         }
 
-        // ── 4. Sort descending, assign ranks ──────────────────────────────────
-        scores.sort_by(|a, b| b.composite.partial_cmp(&a.composite).unwrap_or(std::cmp::Ordering::Equal));
-        for (i, s) in scores.iter_mut().enumerate() {
-            s.rank = i + 1;
-        }
+        // ── 4. Sort descending (ties by ticker), assign ranks ─────────────────
+        sort_and_rank(&mut scores);
 
         info!(
             "PickingEngine: ranked {} tickers  top={} ({:.1})",
@@ -216,7 +219,8 @@ impl PickingEngine {
 
     // ── Signal computation ────────────────────────────────────────────────────
 
-    fn score(&self, data: &MarketData, pairs: Option<&PairsSignal>) -> SignalScore {
+    /// Score one ticker, or `None` if none of its signals had usable data.
+    fn score(&self, data: &MarketData, pairs: Option<&PairsSignal>) -> Option<SignalScore> {
         let macro_on = MacroFilter::compute_macro_on(&data.macro_snapshot);
 
         let momentum_raw    = MomentumSignal.compute(&data.ticker, data);
@@ -225,7 +229,13 @@ impl PickingEngine {
         let sentiment_raw   = SentimentSignal.compute(&data.ticker, data);
         let pairs_raw       = pairs.map(|ps| ps.compute(&data.ticker, data)).unwrap_or(0.0);
 
-        composite_score(
+        // PairsSignal returns exactly 0.0 when it has no correlation data.
+        let availability = SignalAvailability::assess(data, pairs.is_some() && pairs_raw != 0.0);
+        if availability.count() == 0 {
+            return None;
+        }
+
+        Some(composite_score(
             &data.ticker,
             &data.industry_name,
             momentum_raw,
@@ -235,7 +245,8 @@ impl PickingEngine {
             pairs_raw,
             macro_on,
             &self.weights,
-        )
+            &availability,
+        ))
     }
 
     // ── Data gathering ────────────────────────────────────────────────────────
@@ -328,18 +339,28 @@ impl PickingEngine {
     }
 }
 
+// ── Liquidity filter ──────────────────────────────────────────────────────────
+// Min 20-day average dollar volume: $1M USD for US / ₹5Cr INR for NSE (.NS suffix)
+
+fn passes_liquidity_filter(ticker: &str, bars: &[crate::data::PriceBar]) -> bool {
+    if bars.is_empty() {
+        return true; // no bars yet — don't penalise missing data
+    }
+    let window = bars.iter().rev().take(20);
+    let (total_dv, count) = window.fold((0.0_f64, 0_usize), |(dv, n), b| {
+        (dv + b.close * b.volume as f64, n + 1)
+    });
+    if count == 0 {
+        return true;
+    }
+    let avg_dv = total_dv / count as f64;
+    // NSE tickers end in ".NS" — threshold ₹5Cr = 50_000_000
+    let threshold = if ticker.ends_with(".NS") { 50_000_000.0 } else { 1_000_000.0 };
+    avg_dv >= threshold
+}
+
 // ── Price return helper ───────────────────────────────────────────────────────
 
 fn compute_12m1m_return(bars: &[crate::data::PriceBar]) -> Option<f64> {
-    if bars.len() < 50 {
-        return None;
-    }
-    let skip = 21.min(bars.len() / 10);
-    let end_idx = bars.len().saturating_sub(skip + 1);
-    let price_end   = bars[end_idx].adj_close;
-    let price_start = bars[0].adj_close;
-    if price_start <= 0.0 {
-        return None;
-    }
-    Some((price_end - price_start) / price_start)
+    crate::data::prices::momentum_12m1m(bars)
 }

@@ -17,6 +17,11 @@ pub type WeightMap = HashMap<String, f64>;
 ///
 /// `assignments` is a flat list of (ticker, role) pairs across all industries.
 /// One ticker can hold multiple roles — their weights are summed before normalisation.
+///
+/// For `RoleWeighted`: each of the 7 roles receives equal weight (1/7), and each
+/// stock within a role receives equal weight (1/N where N = stocks in that role).
+/// Optional per-role multipliers in the HashMap scale these base weights before
+/// final normalisation.
 pub fn compute_weights(
     assignments: &[(String, Role)],
     mode: &WeightMode,
@@ -25,24 +30,42 @@ pub fn compute_weights(
         return HashMap::new();
     }
 
-    // Accumulate raw weights per ticker
-    let mut raw: HashMap<String, f64> = HashMap::new();
-
-    for (ticker, role) in assignments {
-        let role_weight = match mode {
-            WeightMode::Equal => 1.0,
-            WeightMode::RoleWeighted(multipliers) => {
-                *multipliers.get(role).unwrap_or(&1.0)
+    match mode {
+        WeightMode::Equal => equal_weights(
+            &assignments.iter().map(|(t, _)| t.clone()).collect::<Vec<_>>(),
+        ),
+        WeightMode::RoleWeighted(multipliers) => {
+            // Group tickers by role
+            let mut role_buckets: HashMap<&Role, Vec<&String>> = HashMap::new();
+            for (ticker, role) in assignments {
+                role_buckets.entry(role).or_default().push(ticker);
             }
-        };
-        *raw.entry(ticker.clone()).or_insert(0.0) += role_weight;
-    }
 
-    // Normalise so weights sum to 1.0
-    let total: f64 = raw.values().sum();
-    raw.into_iter()
-        .map(|(ticker, w)| (ticker, w / total))
-        .collect()
+            let n_roles = role_buckets.len().max(1) as f64;
+            let mut raw: HashMap<String, f64> = HashMap::new();
+
+            for (role, tickers) in &role_buckets {
+                let n_in_role = tickers.len().max(1) as f64;
+                // Base: 1/n_roles per role, 1/n_in_role within role
+                let base = (1.0 / n_roles) / n_in_role;
+                // Apply optional multiplier (default 1.0)
+                let mult = multipliers.get(*role).copied().unwrap_or(1.0);
+                let w = base * mult;
+                for ticker in tickers {
+                    *raw.entry((*ticker).clone()).or_insert(0.0) += w;
+                }
+            }
+
+            // Normalise so weights sum exactly to 1.0
+            let total: f64 = raw.values().sum();
+            if total < 1e-12 {
+                return equal_weights(
+                    &assignments.iter().map(|(t, _)| t.clone()).collect::<Vec<_>>(),
+                );
+            }
+            raw.into_iter().map(|(t, w)| (t, w / total)).collect()
+        }
+    }
 }
 
 /// Equal-weight convenience constructor.

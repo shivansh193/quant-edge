@@ -1,11 +1,15 @@
 [package]
-name = "portfolio-sim"
+name = "quant-edge"
 version = "0.1.0"
 edition = "2021"
 
 [[bin]]
-name = "portfolio-sim"
+name = "quant-edge"
 path = "src/main.rs"
+
+[[bin]]
+name = "quant-edge-server"
+path = "src/bin/server.rs"
 
 [dependencies]
 # Async runtime
@@ -45,3 +49,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Matrix operations for correlation engine
 ndarray = "0.15"
+
+# SHA-256 for the tamper-evident forward-test log
+sha2 = "0.10"
+
+# Web server
+axum = { version = "0.7", features = ["json", "macros"] }
+tower-http = { version = "0.5", features = ["cors", "fs"] }
+tower = "0.4"

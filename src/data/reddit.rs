@@ -1,8 +1,9 @@
 use anyhow::{Context, Result};
-use chrono::{Duration, NaiveDate};
+use chrono::NaiveDate;
 use reqwest::{header, Client};
 use tracing::{debug, warn};
 
+use super::asof::{is_historical, AsOf};
 use super::cache::Cache;
 use super::types::RedditSnapshot;
 
@@ -52,10 +53,12 @@ impl RedditFetcher {
         as_of: NaiveDate,
         days: u32,
     ) -> Result<Vec<RedditSnapshot>> {
-        let from = as_of - Duration::days(days as i64);
+        let view = AsOf::new(&self.cache, as_of);
 
-        if self.cache.has_reddit_cache(ticker, 12) {
-            return self.cache.get_reddit_snapshots(ticker, from, as_of);
+        // Reddit search only reflects the present. A snapshot is only valid on
+        // the day it was taken, so for a past date serve stored snapshots only.
+        if is_historical(as_of) || self.cache.has_reddit_cache(ticker, 12) {
+            return view.reddit_snapshots(ticker, days as i64);
         }
 
         debug!(ticker = %ticker, "Reddit: fetching mentions");
@@ -80,7 +83,7 @@ impl RedditFetcher {
             warn!(ticker = %ticker, "All Reddit subreddit fetches failed");
         }
 
-        self.cache.get_reddit_snapshots(ticker, from, as_of)
+        view.reddit_snapshots(ticker, days as i64)
     }
 
     // ── Reddit internals ──────────────────────────────────────────────────────

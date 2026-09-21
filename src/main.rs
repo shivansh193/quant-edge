@@ -3,7 +3,7 @@ use chrono::NaiveDate;
 use clap::{Parser, ValueEnum};
 use tracing_subscriber::EnvFilter;
 
-use portfolio_sim::{
+use quant_edge::{
     backtest::{BacktestConfig, BacktestEngine, print_backtest_report},
     correlations::{ConcentrationGuard, CorrelationEngine},
     daily::{run_morning, run_evening},
@@ -124,6 +124,10 @@ struct Cli {
     #[arg(long, default_value = "^NSEI")]
     benchmark: String,
 
+    /// One-way transaction cost in basis points, charged on turnover at every rebalance
+    #[arg(long, default_value_t = 10.0)]
+    cost_bps: f64,
+
     /// GICS industry codes to exclude (space-separated integers)
     #[arg(long, num_args = 0.., value_delimiter = ' ')]
     exclude_industries: Option<Vec<u32>>,
@@ -194,14 +198,26 @@ struct Cli {
     /// Run the evening mark-to-market report for all open paper positions.
     #[arg(long)]
     evening: bool,
+
+    /// Verify the forward-test log's hash chain (detects edited or removed entries).
+    #[arg(long)]
+    forward_verify: bool,
+
+    /// Score matured forward-test entries against the benchmark.
+    #[arg(long)]
+    forward_eval: bool,
+
+    /// Holding horizon in trading days for --forward-eval.
+    #[arg(long, default_value_t = 21)]
+    horizon: usize,
 }
 
 // ---------------------------------------------------------------------------
 // Conversion helpers (CLI mirror types → library types)
 // ---------------------------------------------------------------------------
 
-fn to_market(m: &CliMarket) -> portfolio_sim::universe::Market {
-    use portfolio_sim::universe::Market;
+fn to_market(m: &CliMarket) -> quant_edge::universe::Market {
+    use quant_edge::universe::Market;
     match m {
         CliMarket::Nse  => Market::NSE,
         CliMarket::Nyse => Market::NYSE,
@@ -209,8 +225,8 @@ fn to_market(m: &CliMarket) -> portfolio_sim::universe::Market {
     }
 }
 
-fn to_cap_filter(c: &CliCapFilter) -> portfolio_sim::universe::CapFilter {
-    use portfolio_sim::universe::CapFilter;
+fn to_cap_filter(c: &CliCapFilter) -> quant_edge::universe::CapFilter {
+    use quant_edge::universe::CapFilter;
     match c {
         CliCapFilter::SmallCap => CapFilter::SmallCap,
         CliCapFilter::MidCap   => CapFilter::MidCap,
@@ -232,12 +248,8 @@ fn to_rebalance_freq(r: &CliRebalanceFreq) -> RebalanceFrequency {
 fn to_weight_mode(w: &CliWeightMode) -> WeightMode {
     match w {
         CliWeightMode::Equal        => WeightMode::Equal,
-        CliWeightMode::RoleWeighted => {
-            eprintln!(
-                "⚠  RoleWeighted optimizer not yet implemented — using Equal weighting."
-            );
-            WeightMode::Equal
-        }
+        // 1/7 per role, equal within role (no custom multipliers from CLI).
+        CliWeightMode::RoleWeighted => WeightMode::RoleWeighted(std::collections::HashMap::new()),
     }
 }
 
@@ -273,7 +285,7 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     // Logging
-    let filter = if cli.verbose { "debug" } else { "portfolio_sim=info,warn" };
+    let filter = if cli.verbose { "debug" } else { "quant_edge=info,warn" };
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::new(filter))
         .with_target(false)
@@ -301,6 +313,53 @@ async fn main() -> Result<()> {
         let engine = PaperTradingEngine::new(cache.clone());
         let portfolio = engine.status()?;
         print_portfolio_status(&portfolio, today);
+        return Ok(());
+    }
+
+    // ── Forward-test log: read-only, no universe needed ──────────────────────
+    if cli.forward_verify || cli.forward_eval {
+        let dir = std::env::var("FORWARD_LOG_DIR")
+            .unwrap_or_else(|_| quant_edge::forward_test::DEFAULT_DIR.to_string());
+        let dir = std::path::Path::new(&dir);
+
+        let v = quant_edge::forward_test::verify(dir)?;
+        match &v.first_error {
+            None => println!("Forward-test log: {} entries, hash chain intact.", v.n_entries),
+            Some(e) => {
+                println!("Forward-test log INTEGRITY FAILURE: {e}");
+                anyhow::bail!("forward-test log failed verification");
+            }
+        }
+
+        if cli.forward_eval {
+            let (outcomes, sum, pending) =
+                quant_edge::forward_test::evaluate(dir, &cache, cli.horizon).await?;
+            println!();
+            println!("Forward-test results ({}-day horizon, next-open entry)", cli.horizon);
+            println!("  Matured entries      {:>8}   (pending: {})", sum.n, pending);
+            if sum.n == 0 {
+                println!("  Nothing has matured yet - check back after {} trading days.", cli.horizon);
+            } else {
+                println!("  Mean basket return   {:>+7.2}%", sum.mean_basket * 100.0);
+                println!("  Mean excess vs index {:>+7.2}%   (t = {:+.2})", sum.mean_excess * 100.0, sum.excess_t_stat);
+                println!("  Beat the index       {:>7.0}%   of entries", sum.hit_rate * 100.0);
+                println!("  Recommended cash     {:>8}   entries", sum.cash_entries);
+                if sum.n < 30 {
+                    println!("  (fewer than 30 matured entries: too few to conclude anything yet)");
+                }
+                println!();
+                for o in outcomes.iter().rev().take(10).rev() {
+                    println!(
+                        "  {}  {:>2} picks  basket {:>+6.2}%  index {}  excess {}",
+                        o.as_of,
+                        o.n_picks,
+                        o.basket_return * 100.0,
+                        o.benchmark_return.map_or("   n/a".to_string(), |b| format!("{:>+6.2}%", b * 100.0)),
+                        o.excess.map_or("   n/a".to_string(), |x| format!("{:>+6.2}%", x * 100.0)),
+                    );
+                }
+            }
+        }
         return Ok(());
     }
 
@@ -386,7 +445,7 @@ async fn main() -> Result<()> {
                 .collect();
             filtered.truncate(spec.top_n);
 
-            let macro_snap = portfolio_sim::data::fred::FredFetcher::new(cache.clone())
+            let macro_snap = quant_edge::data::fred::FredFetcher::new(cache.clone())
                 .macro_snapshot(end_date)
                 .await;
 
@@ -480,7 +539,7 @@ async fn main() -> Result<()> {
             .map(|corr_data| ConcentrationGuard::check(&scores, &corr_data))
             .unwrap_or_default();
 
-        let macro_snap = portfolio_sim::data::fred::FredFetcher::new(cache.clone())
+        let macro_snap = quant_edge::data::fred::FredFetcher::new(cache.clone())
             .macro_snapshot(end_date)
             .await;
 
@@ -508,11 +567,23 @@ async fn main() -> Result<()> {
         println!("\x1b[1m\x1b[97mSIGNAL VALIDATION REPORT\x1b[0m");
         println!();
         for ic in &report.signal_ic {
-            let edge = if ic.has_edge { "\x1b[32m✓ has edge\x1b[0m" } else { "\x1b[31m✗ no edge\x1b[0m" };
+            let verdict = if !ic.evaluable {
+                "\x1b[33m? not evaluable\x1b[0m"
+            } else if ic.has_edge {
+                "\x1b[32m✓ has edge\x1b[0m"
+            } else {
+                "\x1b[31m✗ no significant edge\x1b[0m"
+            };
             println!(
-                "  {:<15}  IC={:>+.4}  σ={:.4}  n={}  {}",
-                ic.signal_name, ic.ic_mean, ic.ic_std, ic.n_dates, edge
+                "  {:<12}  rank IC={:>+.4}  σ={:.4}  t={:>+.2}  hit={:>3.0}%  n={:<3} {}",
+                ic.signal_name, ic.ic_mean, ic.ic_std, ic.t_stat, ic.hit_rate * 100.0, ic.n_dates, verdict
             );
+            if let Some(note) = &ic.note {
+                println!("      \x1b[2m{}\x1b[0m", note);
+            }
+        }
+        for note in &report.notes {
+            println!("  \x1b[2m• {}\x1b[0m", note);
         }
         if let Some(mc) = &report.monte_carlo {
             println!();
@@ -561,6 +632,7 @@ async fn main() -> Result<()> {
         weight_mode:      to_weight_mode(&cli.weight_mode),
         active_roles,
         benchmark_ticker: cli.benchmark.clone(),
+        transaction_cost_bps: cli.cost_bps,
     };
 
     let engine = SimulationEngine::new(&source, sim_config);

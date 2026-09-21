@@ -4,8 +4,27 @@ use rusqlite::{Connection, params};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
+use serde::{Deserialize, Serialize};
+
 use super::source::{AssetInfo, FundamentalSnapshot, MarketCap, PriceBar};
+use super::sec_facts::PitFact;
 use super::types::{InsiderTrade, IndustryCorrelation, MacroDataPoint, NewsItem, RedditSnapshot};
+
+/// One row from the strategy_runs leaderboard table.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StrategyRunRow {
+    pub id:            i64,
+    pub run_at:        String,
+    pub strategy_name: String,
+    pub strategy_spec: String,
+    pub total_return:  f64,
+    pub sharpe:        f64,
+    pub max_drawdown:  f64,
+    pub alpha:         f64,
+    pub ic_mean:       f64,
+    pub start_date:    String,
+    pub end_date:      String,
+}
 
 /// Thread-safe SQLite cache.
 /// Wraps connection in Arc<Mutex<>> — fine for our single-process use case.
@@ -117,9 +136,27 @@ impl Cache {
                 price_to_book           REAL,
                 price_return_12m_1m     REAL,
                 market_share_proxy      REAL,
+                operating_cashflow      REAL,
+                return_on_assets        REAL,
+                gross_profit_margin     REAL,
                 fetched_at              TEXT NOT NULL,
                 PRIMARY KEY (ticker, as_of_date)
             );
+
+            -- Point-in-time company facts (SEC XBRL). Every row carries the date it
+            -- was FILED; readers must only ever see rows with filed <= as_of.
+            CREATE TABLE IF NOT EXISTS pit_facts (
+                ticker       TEXT NOT NULL,
+                concept      TEXT NOT NULL,   -- logical name, e.g. revenue, net_income
+                period_start TEXT NOT NULL,   -- empty string for instant (balance sheet) facts
+                period_end   TEXT NOT NULL,
+                value        REAL NOT NULL,
+                filed        TEXT NOT NULL,
+                form         TEXT NOT NULL,
+                fetched_at   TEXT NOT NULL,
+                PRIMARY KEY (ticker, concept, period_start, period_end, filed)
+            );
+            CREATE INDEX IF NOT EXISTS idx_pit_facts_lookup ON pit_facts (ticker, filed);
 
             CREATE TABLE IF NOT EXISTS universe_cache (
                 market     TEXT NOT NULL,
@@ -127,9 +164,37 @@ impl Cache {
                 fetched_at TEXT NOT NULL,
                 PRIMARY KEY (market)
             );
+
+            CREATE TABLE IF NOT EXISTS strategy_runs (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_at        TEXT    NOT NULL,
+                strategy_name TEXT    NOT NULL,
+                strategy_spec TEXT    NOT NULL,
+                total_return  REAL    NOT NULL,
+                sharpe        REAL    NOT NULL,
+                max_drawdown  REAL    NOT NULL,
+                alpha         REAL    NOT NULL DEFAULT 0,
+                ic_mean       REAL    NOT NULL DEFAULT 0,
+                start_date    TEXT    NOT NULL,
+                end_date      TEXT    NOT NULL
+            );
             ",
         )
         .context("Schema migration failed")?;
+
+        // Additive columns for existing databases — errors mean column already exists
+        for sql in &[
+            "ALTER TABLE fundamentals ADD COLUMN operating_cashflow  REAL",
+            "ALTER TABLE fundamentals ADD COLUMN return_on_assets    REAL",
+            "ALTER TABLE fundamentals ADD COLUMN gross_profit_margin REAL",
+            // Provenance. Rows written before this column existed are NULL and are
+            // NOT trusted for historical dates: they hold a *current* snapshot
+            // stamped with an old as_of date (look-ahead bias).
+            "ALTER TABLE fundamentals ADD COLUMN source TEXT",
+        ] {
+            let _ = conn.execute(sql, []);
+        }
+
         Ok(())
     }
 
@@ -263,20 +328,29 @@ impl Cache {
 
     // ── Fundamentals ──────────────────────────────────────────────────────────
 
+    /// Cached fundamentals for exactly (ticker, as_of).
+    ///
+    /// When `require_point_in_time` is true only rows built from dated SEC
+    /// filings (source = sec_pit) are returned. Use that for any historical
+    /// date: legacy/Yahoo rows are current-day snapshots and would leak the
+    /// future into a backtest.
     pub fn get_fundamentals(
         &self,
         ticker: &str,
         as_of: NaiveDate,
+        require_point_in_time: bool,
     ) -> Result<Option<FundamentalSnapshot>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare_cached(
             "SELECT revenue_ttm, revenue_cagr_3yr, net_margin_pct,
-                    debt_to_equity, price_to_book, price_return_12m_1m, market_share_proxy
+                    debt_to_equity, price_to_book, price_return_12m_1m, market_share_proxy,
+                    operating_cashflow, return_on_assets, gross_profit_margin
              FROM fundamentals
-             WHERE ticker = ?1 AND as_of_date = ?2",
+             WHERE ticker = ?1 AND as_of_date = ?2
+               AND (?3 = 0 OR source = 'sec_pit')",
         )?;
 
-        let mut rows = stmt.query(params![ticker, as_of.to_string()])?;
+        let mut rows = stmt.query(params![ticker, as_of.to_string(), require_point_in_time as i64])?;
         if let Some(row) = rows.next()? {
             Ok(Some(FundamentalSnapshot {
                 ticker: ticker.to_string(),
@@ -288,20 +362,26 @@ impl Cache {
                 price_to_book: row.get(4)?,
                 price_return_12m_1m: row.get(5)?,
                 market_share_proxy: row.get(6)?,
+                operating_cashflow: row.get(7)?,
+                return_on_assets: row.get(8)?,
+                gross_profit_margin: row.get(9)?,
             }))
         } else {
             Ok(None)
         }
     }
 
-    pub fn insert_fundamentals(&self, snap: &FundamentalSnapshot) -> Result<()> {
+    /// Store a fundamentals snapshot. `source` records provenance:
+    /// sec_pit (dated filings, safe for backtests) or yahoo_current (a live
+    /// snapshot, only valid for today).
+    pub fn insert_fundamentals(&self, snap: &FundamentalSnapshot, source: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT OR REPLACE INTO fundamentals
              (ticker, as_of_date, revenue_ttm, revenue_cagr_3yr, net_margin_pct,
               debt_to_equity, price_to_book, price_return_12m_1m, market_share_proxy,
-              fetched_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, datetime('now'))",
+              operating_cashflow, return_on_assets, gross_profit_margin, fetched_at, source)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, datetime('now'), ?13)",
             params![
                 snap.ticker,
                 snap.date.to_string(),
@@ -312,9 +392,91 @@ impl Cache {
                 snap.price_to_book,
                 snap.price_return_12m_1m,
                 snap.market_share_proxy,
+                snap.operating_cashflow,
+                snap.return_on_assets,
+                snap.gross_profit_margin,
+                source,
             ],
         )?;
         Ok(())
+    }
+
+    // ── Point-in-time SEC facts ───────────────────────────────────────────────
+
+    pub fn insert_pit_facts(&self, ticker: &str, facts: &[PitFact]) -> Result<usize> {
+        if facts.is_empty() {
+            return Ok(0);
+        }
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let mut inserted = 0usize;
+        {
+            let mut stmt = tx.prepare_cached(
+                "INSERT OR IGNORE INTO pit_facts
+                 (ticker, concept, period_start, period_end, value, filed, form, fetched_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, datetime('now'))",
+            )?;
+            for f in facts {
+                inserted += stmt.execute(params![
+                    ticker,
+                    f.concept,
+                    f.start.map(|d| d.to_string()).unwrap_or_default(),
+                    f.end.to_string(),
+                    f.value,
+                    f.filed.to_string(),
+                    f.form,
+                ])?;
+            }
+        }
+        tx.commit()?;
+        Ok(inserted)
+    }
+
+    /// Every fact FILED on or before as_of. The filed <= as_of predicate is
+    /// the point-in-time guarantee: a value that was not yet public cannot
+    /// be returned, however it was later restated.
+    pub fn get_pit_facts(&self, ticker: &str, as_of: NaiveDate) -> Result<Vec<PitFact>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare_cached(
+            "SELECT concept, period_start, period_end, value, filed, form
+             FROM pit_facts
+             WHERE ticker = ?1 AND filed <= ?2",
+        )?;
+        let rows = stmt
+            .query_map(params![ticker, as_of.to_string()], |row| {
+                let start: String = row.get(1)?;
+                let end: String = row.get(2)?;
+                let filed: String = row.get(4)?;
+                Ok((row.get::<_, String>(0)?, start, end, row.get::<_, f64>(3)?, filed, row.get::<_, String>(5)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(rows
+            .into_iter()
+            .filter_map(|(concept, start, end, value, filed, form)| {
+                Some(PitFact {
+                    concept,
+                    start: if start.is_empty() { None } else { start.parse().ok() },
+                    end: end.parse().ok()?,
+                    value,
+                    filed: filed.parse().ok()?,
+                    form,
+                })
+            })
+            .collect())
+    }
+
+    /// True if SEC facts for this ticker were downloaded within max_age_days.
+    pub fn has_pit_facts(&self, ticker: &str, max_age_days: i64) -> bool {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT COUNT(*) FROM pit_facts
+             WHERE ticker = ?1 AND fetched_at >= datetime('now', ?2)",
+            params![ticker, format!("-{} days", max_age_days)],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap_or(0)
+            > 0
     }
 
     // ── Insider trades ────────────────────────────────────────────────────────
@@ -331,6 +493,7 @@ impl Cache {
                     shares, transaction_type
              FROM insider_trades
              WHERE ticker = ?1 AND trade_date >= ?2 AND trade_date <= ?3
+               AND filing_date <= ?3
              ORDER BY trade_date DESC",
         )?;
 
@@ -482,7 +645,11 @@ impl Cache {
             "SELECT fetch_date, subreddit, mention_count,
                     avg_upvote_ratio, total_comments
              FROM reddit_mentions
-             WHERE ticker = ?1 AND fetch_date >= ?2 AND fetch_date <= ?3",
+             WHERE ticker = ?1 AND fetch_date >= ?2 AND fetch_date <= ?3
+               -- A snapshot is only valid on the day it was taken. Rows whose
+               -- fetched_at is well after their fetch_date were labelled with an
+               -- old date by a historical run (current data, past label): hide them.
+               AND date(fetched_at) <= date(fetch_date, '+3 days')",
         )?;
 
         let rows = stmt.query_map(
@@ -504,12 +671,20 @@ impl Cache {
     }
 
     pub fn insert_reddit_snapshot(&self, snap: &RedditSnapshot) -> Result<()> {
+        self.insert_reddit_snapshot_at(snap, None)
+    }
+
+    /// Like insert_reddit_snapshot, but records an explicit collection time
+    /// (`YYYY-MM-DD HH:MM:SS`, UTC). `None` means "now". Exists so tests and
+    /// imports can state when data was really collected: a snapshot is only
+    /// valid for the date it was taken (see get_reddit_snapshots).
+    pub fn insert_reddit_snapshot_at(&self, snap: &RedditSnapshot, fetched_at: Option<&str>) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT OR REPLACE INTO reddit_mentions
              (ticker, fetch_date, subreddit, mention_count,
               avg_upvote_ratio, total_comments, fetched_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, datetime('now'))",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, COALESCE(?7, datetime('now')))",
             params![
                 snap.ticker,
                 snap.fetch_date.to_string(),
@@ -517,6 +692,7 @@ impl Cache {
                 snap.mention_count as i64,
                 snap.avg_upvote_ratio,
                 snap.total_comments as i64,
+                fetched_at,
             ],
         )?;
         Ok(())
@@ -630,6 +806,45 @@ impl Cache {
         Ok(rows)
     }
 
+    /// The most recent correlation matrix computed on or before as_of and no
+    /// older than max_age_days at as_of. Unlike get_industry_correlations this
+    /// can never return a matrix computed from data after as_of, and it does not
+    /// depend on the wall clock (the old freshness check made re-running an old
+    /// backtest load a matrix built from the future).
+    pub fn get_industry_correlations_asof(
+        &self,
+        window_days: u32,
+        as_of: NaiveDate,
+        max_age_days: i64,
+    ) -> Result<Vec<IndustryCorrelation>> {
+        let conn = self.conn.lock().unwrap();
+        let oldest = as_of - chrono::Duration::days(max_age_days);
+        let mut stmt = conn.prepare_cached(
+            "SELECT industry_a, industry_b, correlation, date
+             FROM industry_correlations
+             WHERE window_days = ?1
+               AND date = (
+                   SELECT MAX(date) FROM industry_correlations
+                   WHERE window_days = ?1 AND date <= ?2 AND date >= ?3
+               )",
+        )?;
+        let rows = stmt
+            .query_map(params![window_days, as_of.to_string(), oldest.to_string()], |row| {
+                Ok(IndustryCorrelation {
+                    industry_a: row.get(0)?,
+                    industry_b: row.get(1)?,
+                    correlation: row.get(2)?,
+                    date: row
+                        .get::<_, String>(3)?
+                        .parse()
+                        .unwrap_or_else(|_| chrono::NaiveDate::from_ymd_opt(2000, 1, 1).unwrap()),
+                    window_days,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     pub fn insert_industry_correlations(&self, corrs: &[IndustryCorrelation]) -> Result<()> {
         if corrs.is_empty() {
             return Ok(());
@@ -728,6 +943,65 @@ impl Cache {
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(e.into()),
         }
+    }
+
+    // ── Strategy runs (leaderboard) ───────────────────────────────────────────
+
+    /// Persist one completed backtest result for the leaderboard.
+    pub fn save_strategy_run(
+        &self,
+        strategy_name: &str,
+        strategy_spec_json: &str,
+        total_return: f64,
+        sharpe: f64,
+        max_drawdown: f64,
+        alpha: f64,
+        ic_mean: f64,
+        start_date: &str,
+        end_date: &str,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO strategy_runs
+             (run_at, strategy_name, strategy_spec, total_return, sharpe,
+              max_drawdown, alpha, ic_mean, start_date, end_date)
+             VALUES (datetime('now'), ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                strategy_name, strategy_spec_json,
+                total_return, sharpe, max_drawdown, alpha, ic_mean,
+                start_date, end_date,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Return all past strategy runs ordered by Sharpe ratio descending.
+    pub fn load_strategy_history(&self) -> Result<Vec<StrategyRunRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare_cached(
+            "SELECT id, run_at, strategy_name, strategy_spec,
+                    total_return, sharpe, max_drawdown, alpha, ic_mean,
+                    start_date, end_date
+             FROM strategy_runs
+             ORDER BY sharpe DESC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(StrategyRunRow {
+                id:            row.get(0)?,
+                run_at:        row.get(1)?,
+                strategy_name: row.get(2)?,
+                strategy_spec: row.get(3)?,
+                total_return:  row.get(4)?,
+                sharpe:        row.get(5)?,
+                max_drawdown:  row.get(6)?,
+                alpha:         row.get(7)?,
+                ic_mean:       row.get(8)?,
+                start_date:    row.get(9)?,
+                end_date:      row.get(10)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
     }
 
     /// Load the stored paper portfolio JSON blob, returning None if none exists yet.
