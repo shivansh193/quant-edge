@@ -29,6 +29,26 @@ pub fn print_backtest_report(result: &BacktestResult, spec_name: &str) {
         println!("  IC Periods              {:>14}", result.signal_ic_per_period.len());
     }
 
+    if result.beta.is_some() || result.cvar_95.is_some() || result.final_concentration_hhi.is_some() {
+        println!();
+        println!("  \x1b[1mRisk\x1b[0m");
+        println!("  ─────────────────────────────────────────");
+        if let Some(b) = result.beta {
+            println!("  Beta (vs. benchmark)    {:>14.2}", b);
+        }
+        if let Some(cv) = result.cvar_95 {
+            println!("  95% CVaR (daily)        {:>13.2}%", cv * 100.0);
+        }
+        if let Some(hhi) = result.final_concentration_hhi {
+            let effective_n = if hhi > 1e-12 { 1.0 / hhi } else { 0.0 };
+            println!("  Final HHI               {:>14.3}", hhi);
+            println!("  Effective # positions   {:>14.1}", effective_n);
+        }
+        if result.breaker_trip_days_pct > 0.0 {
+            println!("  Drawdown breaker active {:>13.1}%  of days", result.breaker_trip_days_pct);
+        }
+    }
+
     println!();
     println!("  \x1b[1mEquity Curve (monthly samples)\x1b[0m");
     println!("  ─────────────────────────────────────────");

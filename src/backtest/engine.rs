@@ -45,6 +45,20 @@ pub struct BacktestConfig {
     pub tax:                   Option<TaxModel>,
     /// Benchmark ticker; `None` picks ^NSEI or ^GSPC from the universe.
     pub benchmark_ticker:      Option<String>,
+    /// Cap any single NEW position at this fraction of portfolio equity
+    /// (e.g. 0.10 = 10%), redistributing the rest across the other targets.
+    /// Applies to sizing at entry only — an existing held position is not
+    /// resized if it later drifts above the cap, same as the engine already
+    /// doesn't rebalance held names back to equal weight. `None` = no cap.
+    pub max_position_weight:   Option<f64>,
+    /// Force to cash once the BENCHMARK's drawdown crosses the breaker's
+    /// threshold, resuming once it recovers past `resume_at`. Tracks the
+    /// benchmark rather than this portfolio's own equity on purpose: once
+    /// tripped the response is 100% cash, and a cash equity curve never
+    /// moves, so a self-referential breaker could never release. Needs a
+    /// benchmark to have any effect; a note is added to the result if none
+    /// is available. `None` = off.
+    pub drawdown_breaker:      Option<crate::risk::DrawdownBreaker>,
 }
 
 impl BacktestConfig {
@@ -61,6 +75,8 @@ impl BacktestConfig {
             risk_free_annual: 0.0,
             tax: None,
             benchmark_ticker: None,
+            max_position_weight: None,
+            drawdown_breaker: None,
         }
     }
 }
@@ -145,6 +161,22 @@ pub struct BacktestResult {
     /// Human-readable warnings about the run (failed rankings, etc.).
     #[serde(default)]
     pub notes:                Vec<String>,
+    /// Share of trading days the drawdown breaker (if configured) was
+    /// tripped, forcing new rebalances to cash.
+    #[serde(default)]
+    pub breaker_trip_days_pct: f64,
+    /// OLS beta of daily portfolio returns against the benchmark. `None`
+    /// without a benchmark or without enough overlapping days.
+    #[serde(default)]
+    pub beta:                 Option<f64>,
+    /// Historical 95% CVaR (Expected Shortfall) of daily returns: the average
+    /// of the worst 5% of days, as a fraction (e.g. -0.03 = -3%).
+    #[serde(default)]
+    pub cvar_95:               Option<f64>,
+    /// Herfindahl-Hirschman Index of the FINAL open positions (1/n for n
+    /// equal-weight names; 1.0 for a single name). `None` if flat at the end.
+    #[serde(default)]
+    pub final_concentration_hhi: Option<f64>,
 }
 
 // ── Engine ────────────────────────────────────────────────────────────────────
@@ -266,6 +298,12 @@ pub async fn simulate(
     let mut pending: Option<Vec<String>> = None;
     let mut n_rebalances = 0usize;
     let mut cash_days = 0usize;
+    let mut breaker_state = crate::risk::BreakerState::default();
+    // Evaluated once per day from that day's own mark-to-market equity, so the
+    // breaker reacts to today's drawdown before tomorrow's decision — not to
+    // a stale value from the last rebalance.
+    let mut breaker_tripped = false;
+    let mut breaker_trip_days = 0usize;
 
     for &date in &calendar {
         // 1. Fill orders decided at the previous close.
@@ -289,7 +327,15 @@ pub async fn simulate(
                         config.spec.filters.min_score,
                         macro_gate,
                     );
-                    let targets: Vec<String> = picks.into_iter().map(|p| p.ticker).collect();
+                    // Drawdown breaker overrides the model's picks with cash,
+                    // same precedence as the macro gate. Reflects the
+                    // drawdown as of the last close (yesterday's), not today's
+                    // own equity, which isn't known until step 3 below.
+                    let targets: Vec<String> = if breaker_tripped {
+                        Vec::new()
+                    } else {
+                        picks.into_iter().map(|p| p.ticker).collect()
+                    };
                     n_rebalances += 1;
                     match config.execution {
                         ExecutionTiming::NextOpen => pending = Some(targets),
@@ -305,9 +351,29 @@ pub async fn simulate(
         }
 
         // 3. Mark to market at the close.
-        daily_equity.push((date, book.cash + book.market_value(prices, date)));
+        let equity_today = book.cash + book.market_value(prices, date);
+        daily_equity.push((date, equity_today));
         if book.positions.is_empty() {
             cash_days += 1;
+        }
+
+        // Tracked against the BENCHMARK, not the portfolio's own equity: once
+        // tripped, the response is to hold 100% cash, and cash by definition
+        // never moves. A breaker measuring its own equity would freeze its
+        // drawdown at the trip level forever (cash can't "recover") and could
+        // never release. The benchmark keeps moving regardless of what this
+        // portfolio holds, so "back off when the market is down N%, resume
+        // once it recovers" is both correct and how such breakers are
+        // conventionally defined in practice.
+        if let Some(breaker) = &config.drawdown_breaker {
+            if let Some(bench_price) = benchmark.and_then(|b| b.on_or_before(date)).map(|b| b.adj_close) {
+                breaker_tripped = breaker.step(&mut breaker_state, bench_price);
+                if breaker_tripped {
+                    breaker_trip_days += 1;
+                }
+            } else if breaker_trip_days == 0 && daily_equity.len() == 1 {
+                notes.push("drawdown_breaker configured but no benchmark prices are available - the breaker will never trip".to_string());
+            }
         }
     }
 
@@ -371,6 +437,34 @@ pub async fn simulate(
         None => (None, None),
     };
 
+    // Beta vs. the benchmark's own daily returns, paired day-for-day with
+    // ours (forward-filled from the same calendar, so a benchmark holiday
+    // doesn't misalign the pairing).
+    let beta = benchmark.and_then(|b| {
+        let bench_levels: Vec<f64> = calendar.iter().filter_map(|d| b.on_or_before(*d)).map(|bar| bar.adj_close).collect();
+        if bench_levels.len() != calendar.len() {
+            return None; // benchmark doesn't cover the full window
+        }
+        let bench_returns: Vec<f64> = bench_levels.windows(2).map(|w| w[1] / w[0] - 1.0).collect();
+        crate::risk::beta(&daily_returns, &bench_returns)
+    });
+    let cvar_95 = crate::risk::cvar(&daily_returns, 0.95);
+    let final_concentration_hhi = {
+        let final_values: HashMap<String, f64> = book
+            .positions
+            .iter()
+            .filter_map(|(t, p)| {
+                let px = prices.get(t).and_then(|s| s.on_or_before(last_date)).map(|b| b.adj_close)?;
+                Some((t.clone(), p.shares * px))
+            })
+            .collect();
+        let total: f64 = final_values.values().sum();
+        (total > 0.0).then(|| {
+            let final_weights: HashMap<String, f64> = final_values.iter().map(|(k, v)| (k.clone(), v / total)).collect();
+            crate::risk::herfindahl_index(&final_weights)
+        })
+    };
+
     let (tax, after_tax_return_pct) = match &config.tax {
         Some(model) => {
             let gains: Vec<RealizedGain> = closed
@@ -416,6 +510,10 @@ pub async fn simulate(
         tax,
         after_tax_return_pct,
         notes,
+        breaker_trip_days_pct: breaker_trip_days as f64 / calendar.len() as f64 * 100.0,
+        beta,
+        cvar_95,
+        final_concentration_hhi,
     })
 }
 
@@ -539,7 +637,14 @@ impl Book {
                 p.shares * px
             })
             .sum();
-        let alloc = (self.cash + held_value) / targets.len() as f64;
+        let total_equity = self.cash + held_value;
+        let n = targets.len() as f64;
+        let equal_weights: HashMap<String, f64> =
+            targets.iter().map(|t| (t.clone(), 1.0 / n)).collect();
+        let target_weights = match cfg.max_position_weight {
+            Some(cap) => crate::risk::apply_position_cap(&equal_weights, cap),
+            None => equal_weights,
+        };
 
         for ticker in targets {
             if self.positions.contains_key(ticker) {
@@ -552,6 +657,7 @@ impl Book {
             }
             let Some(reference) = ref_price(series, date, cfg.execution) else { continue };
 
+            let alloc = target_weights.get(ticker).copied().unwrap_or(1.0 / n) * total_equity;
             let spend = alloc.min(self.cash);
             let (adv, vol) = liquidity(series, date);
             let fill = cfg.costs.execution_price(reference, true, spend, adv, vol);
@@ -745,7 +851,8 @@ mod tests {
         out
     }
 
-    use chrono::Datelike;
+    use chrono::{Datelike, Weekday};
+    use crate::data::prices::test_bar;
 
     fn store(items: Vec<(&str, Vec<PriceBar>)>) -> PriceStore {
         let mut s = PriceStore::new();
@@ -1089,5 +1196,203 @@ mod tests {
     fn period_ic_needs_enough_names() {
         let prices = store(vec![("A", weekday_bars("2024-01-01", 10, |_| (1.0, 1.0)))]);
         assert!(period_ic(&[sc("A", 0.5, true)], d("2024-01-01"), d("2024-01-12"), &prices).is_none());
+    }
+
+    // ── risk controls ─────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn max_position_weight_caps_every_position_when_the_equal_share_exceeds_it() {
+        // The engine sizes new entries equal-weight (1/N each), regardless of
+        // composite score - so a cap only ever binds uniformly across equal
+        // targets. With 3 targets at 1/3 each and a cap of 0.30 (infeasible:
+        // 0.30*3 = 0.9 < 1.0), every position must be held at or under the
+        // cap and the unallocatable remainder is left as cash instead of
+        // silently breaching the cap.
+        let a = weekday_bars("2024-01-01", 20, |i| (100.0 + i as f64, 100.0 + i as f64));
+        let b = weekday_bars("2024-01-01", 20, |i| (100.0 + i as f64, 100.0 + i as f64));
+        let c = weekday_bars("2024-01-01", 20, |i| (100.0 + i as f64, 100.0 + i as f64));
+        let prices = store(vec![("A", a), ("B", b), ("C", c)]);
+
+        let mut cfg = config("2024-01-01", "2024-01-26", 365);
+        cfg.spec.top_n = 3;
+        cfg.max_position_weight = Some(0.30);
+
+        let ranker = FnRanker(|_| Ok(vec![sc("A", 0.9, true), sc("B", 0.5, true), sc("C", 0.5, true)]));
+        let r = simulate(&ranker, &universe(), &prices, None, &cfg).await.unwrap();
+
+        let notional_of = |t: &str| -> f64 {
+            r.trades.iter().filter(|tr| tr.ticker == t && matches!(tr.side, TradeSide::Buy))
+                .map(|tr| tr.shares * tr.price).sum()
+        };
+        let invested: f64 = ["A", "B", "C"].iter().map(|t| notional_of(t)).sum();
+        for t in ["A", "B", "C"] {
+            assert!(
+                notional_of(t) / cfg.initial_capital <= 0.30 + 0.01,
+                "{t}'s share {} exceeds the cap", notional_of(t) / cfg.initial_capital
+            );
+        }
+        assert!(invested < cfg.initial_capital * 0.95, "an infeasible cap must leave cash uninvested, not overshoot");
+    }
+
+    #[tokio::test]
+    async fn max_position_weight_has_no_effect_when_the_equal_share_is_already_under_it() {
+        let a = weekday_bars("2024-01-01", 20, |i| (100.0 + i as f64, 100.0 + i as f64));
+        let b = weekday_bars("2024-01-01", 20, |i| (100.0 + i as f64, 100.0 + i as f64));
+        let prices = store(vec![("A", a.clone()), ("B", b)]);
+        let mut cfg = config("2024-01-01", "2024-01-26", 365);
+        cfg.spec.top_n = 2;
+        cfg.max_position_weight = Some(0.60); // equal share is 0.50, well under
+        let ranker = FnRanker(|_| Ok(vec![sc("A", 0.9, true), sc("B", 0.5, true)]));
+        let r = simulate(&ranker, &universe(), &prices, None, &cfg).await.unwrap();
+        let invested: f64 = r.trades.iter().filter(|t| matches!(t.side, TradeSide::Buy)).map(|t| t.shares * t.price).sum();
+        assert!(invested > cfg.initial_capital * 0.95, "a non-binding cap must not leave capital idle");
+    }
+
+    #[tokio::test]
+    async fn without_a_cap_a_single_pick_takes_the_whole_book() {
+        let a = weekday_bars("2024-01-01", 20, |i| (100.0 + i as f64, 100.0 + i as f64));
+        let prices = store(vec![("A", a)]);
+        let cfg = config("2024-01-01", "2024-01-26", 365); // max_position_weight: None
+        let ranker = FnRanker(|_| Ok(vec![sc("A", 0.9, true)]));
+        let r = simulate(&ranker, &universe(), &prices, None, &cfg).await.unwrap();
+        assert!(r.trades[0].shares * r.trades[0].price > cfg.initial_capital * 0.99);
+    }
+
+    #[tokio::test]
+    async fn drawdown_breaker_forces_cash_after_a_crash_and_resumes_after_recovery() {
+        // The BENCHMARK crashes hard then fully recovers; A just holds steady
+        // throughout, so any liquidation/re-entry is caused by the breaker
+        // reacting to the benchmark, not by A's own price action.
+        let bench = weekday_bars("2024-01-01", 40, |i| {
+            let px = if i < 5 { 100.0 } else if i < 15 { 60.0 } else { 100.0 + i as f64 };
+            (px, px)
+        });
+        let a = weekday_bars("2024-01-01", 40, |_| (50.0, 50.0));
+        let prices = store(vec![("A", a)]);
+        let bench_series = PriceSeries::new(bench);
+
+        let mut cfg = config("2024-01-01", "2024-02-23", 5);
+        cfg.drawdown_breaker = Some(crate::risk::DrawdownBreaker { threshold: 0.20, resume_at: 0.05 });
+        let ranker = FnRanker(|_| Ok(vec![sc("A", 0.9, true)]));
+        let r = simulate(&ranker, &universe(), &prices, Some(&bench_series), &cfg).await.unwrap();
+
+        assert!(r.breaker_trip_days_pct > 0.0, "the benchmark's -40% crash should have tripped the breaker");
+        assert!(r.cash_days_pct > 0.0, "tripping should have forced a liquidation to cash");
+        assert!(r.notes.is_empty(), "a benchmark was supplied, no 'never trips' warning expected: {:?}", r.notes);
+        // It must also have bought back in once the benchmark recovered.
+        let buys = r.trades.iter().filter(|t| matches!(t.side, TradeSide::Buy)).count();
+        assert!(buys >= 2, "expected a re-entry after the benchmark recovered, got {buys} buy(s)");
+    }
+
+    #[tokio::test]
+    async fn drawdown_breaker_without_a_benchmark_never_trips_and_says_so() {
+        let a = weekday_bars("2024-01-01", 30, |i| {
+            let px = if i < 5 { 100.0 } else { 40.0 }; // A itself crashes hard
+            (px, px)
+        });
+        let prices = store(vec![("A", a)]);
+        let mut cfg = config("2024-01-01", "2024-01-31", 5);
+        cfg.drawdown_breaker = Some(crate::risk::DrawdownBreaker::default());
+        let ranker = FnRanker(|_| Ok(vec![sc("A", 0.9, true)]));
+        // No benchmark passed: the breaker cannot react to A's own crash
+        // (that would be the self-referential deadlock this design avoids).
+        let r = simulate(&ranker, &universe(), &prices, None, &cfg).await.unwrap();
+        assert_eq!(r.breaker_trip_days_pct, 0.0);
+        assert!(r.notes.iter().any(|n| n.contains("no benchmark")), "{:?}", r.notes);
+    }
+
+    #[tokio::test]
+    async fn without_a_breaker_configured_it_never_trips() {
+        let a = weekday_bars("2024-01-01", 30, |i| {
+            let px = if i < 5 { 100.0 } else { 40.0 };
+            (px, px)
+        });
+        let prices = store(vec![("A", a)]);
+        let cfg = config("2024-01-01", "2024-01-31", 5); // drawdown_breaker: None
+        let ranker = FnRanker(|_| Ok(vec![sc("A", 0.9, true)]));
+        let r = simulate(&ranker, &universe(), &prices, None, &cfg).await.unwrap();
+        assert_eq!(r.breaker_trip_days_pct, 0.0);
+    }
+
+    // ── risk metrics surfaced on BacktestResult ───────────────────────────────
+
+    #[tokio::test]
+    async fn beta_reflects_a_known_relationship_to_the_benchmark() {
+        // A's daily return is exactly 2x the benchmark's every day. Returns
+        // must actually VARY day to day (not a constant compounding rate,
+        // which has zero variance and makes beta mathematically undefined).
+        let bench_returns = [0.01, -0.02, 0.015, -0.005, 0.02, -0.01, 0.008, -0.012, 0.03, -0.02];
+        let mut bench_level = 100.0;
+        let mut a_level = 100.0;
+        let mut bench_bars = Vec::new();
+        let mut a_bars = Vec::new();
+        let mut date = d("2024-01-01");
+        for &r in &bench_returns {
+            while matches!(date.weekday(), Weekday::Sat | Weekday::Sun) {
+                date += Duration::days(1);
+            }
+            bench_level *= 1.0 + r;
+            a_level *= 1.0 + 2.0 * r;
+            bench_bars.push(test_bar(&date.to_string(), bench_level));
+            a_bars.push(test_bar(&date.to_string(), a_level));
+            date += Duration::days(1);
+        }
+        let prices = store(vec![("A", a_bars)]);
+        let bench_series = PriceSeries::new(bench_bars);
+        let mut cfg = config("2024-01-01", &date.to_string(), 365);
+        // Same-close fill: otherwise the next-open entry delay leaves day 1
+        // 100% in cash while the benchmark already moved, diluting the
+        // regression away from the exact relationship this test constructs.
+        cfg.execution = ExecutionTiming::SameClose;
+        let ranker = FnRanker(|_| Ok(vec![sc("A", 0.9, true)]));
+        let r = simulate(&ranker, &universe(), &prices, Some(&bench_series), &cfg).await.unwrap();
+        assert!((r.beta.unwrap() - 2.0).abs() < 0.01, "{:?}", r.beta);
+    }
+
+    #[tokio::test]
+    async fn beta_is_none_without_a_benchmark() {
+        let a = weekday_bars("2024-01-01", 20, |i| (100.0 + i as f64, 100.0 + i as f64));
+        let prices = store(vec![("A", a)]);
+        let cfg = config("2024-01-01", "2024-01-26", 365);
+        let ranker = FnRanker(|_| Ok(vec![sc("A", 0.9, true)]));
+        let r = simulate(&ranker, &universe(), &prices, None, &cfg).await.unwrap();
+        assert!(r.beta.is_none());
+    }
+
+    #[tokio::test]
+    async fn cvar_is_reported_and_negative_for_a_choppy_series() {
+        let a = weekday_bars("2024-01-01", 30, |i| {
+            let px = 100.0 * if i % 2 == 0 { 1.05 } else { 0.90 };
+            (px, px)
+        });
+        let prices = store(vec![("A", a)]);
+        let cfg = config("2024-01-01", "2024-01-31", 365);
+        let ranker = FnRanker(|_| Ok(vec![sc("A", 0.9, true)]));
+        let r = simulate(&ranker, &universe(), &prices, None, &cfg).await.unwrap();
+        assert!(r.cvar_95.unwrap() < 0.0, "{:?}", r.cvar_95);
+    }
+
+    #[tokio::test]
+    async fn final_concentration_hhi_matches_the_ending_position_count() {
+        let a = weekday_bars("2024-01-01", 20, |i| (100.0 + i as f64, 100.0 + i as f64));
+        let b = weekday_bars("2024-01-01", 20, |i| (100.0 + i as f64, 100.0 + i as f64));
+        let prices = store(vec![("A", a), ("B", b)]);
+        let mut cfg = config("2024-01-01", "2024-01-26", 365);
+        cfg.spec.top_n = 2;
+        let ranker = FnRanker(|_| Ok(vec![sc("A", 0.9, true), sc("B", 0.8, true)]));
+        let r = simulate(&ranker, &universe(), &prices, None, &cfg).await.unwrap();
+        // Two roughly-equal-weight positions -> HHI close to 0.5, not 1.0 (concentrated) or 0 (empty).
+        let hhi = r.final_concentration_hhi.unwrap();
+        assert!((hhi - 0.5).abs() < 0.05, "{hhi}");
+    }
+
+    #[tokio::test]
+    async fn final_concentration_hhi_is_none_when_flat() {
+        let a = weekday_bars("2024-01-01", 20, |i| (100.0 + i as f64, 100.0 + i as f64));
+        let prices = store(vec![("A", a)]);
+        let cfg = config("2024-01-01", "2024-01-26", 365);
+        let ranker = FnRanker(|_| Ok(vec![sc("A", 0.9, false)])); // risk-off: stays flat
+        let r = simulate(&ranker, &universe(), &prices, None, &cfg).await.unwrap();
+        assert!(r.final_concentration_hhi.is_none());
     }
 }

@@ -45,3 +45,6 @@ out/
 
 # Point-in-time replay output (a backtest; must not be mixed with forward_log/)
 backfill_log/
+
+# Local cache.db backups (scripts/backup_cache.*)
+backups/
