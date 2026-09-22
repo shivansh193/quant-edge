@@ -7,7 +7,7 @@ use quant_edge::{
     backtest::{BacktestConfig, BacktestEngine, print_backtest_report},
     correlations::{ConcentrationGuard, CorrelationEngine},
     daily::{run_morning, run_evening},
-    data::{yahoo::YahooFinance, cache::Cache},
+    data::{yahoo::YahooFinance, cache::Cache, DataSource},
     gics::GicsTaxonomy,
     llm::parse_strategy,
     paper_trading::{PaperTradingEngine, print_portfolio_status},
@@ -224,6 +224,46 @@ struct Cli {
     /// (default: $FORWARD_LOG_DIR or forward_log; backfill defaults to backfill_log).
     #[arg(long)]
     log_dir: Option<String>,
+
+    // ── Decision journal ──────────────────────────────────────────────────────
+
+    /// Log a new discretionary call: your own thesis, before the outcome is known.
+    /// Requires --ticker, --thesis and --holding-days; --entry-price is fetched
+    /// from the latest close if omitted.
+    #[arg(long)]
+    journal_add: bool,
+
+    /// List journal entries (default: open ones). Combine with --status closed/all.
+    #[arg(long)]
+    journal_list: bool,
+
+    /// Close a journal entry by id: --journal-close --id N [--exit-price P] [--notes "..."].
+    /// --exit-price is fetched from the latest close if omitted.
+    #[arg(long)]
+    journal_close: bool,
+
+    /// List open journal entries whose expected holding period has elapsed
+    /// and print a summary of every closed entry so far (hit rate, mean
+    /// return, and how you did when you agreed vs. disagreed with the model).
+    #[arg(long)]
+    journal_score: bool,
+
+    #[arg(long)]
+    ticker: Option<String>,
+    #[arg(long)]
+    thesis: Option<String>,
+    #[arg(long)]
+    holding_days: Option<u32>,
+    #[arg(long)]
+    entry_price: Option<f64>,
+    #[arg(long)]
+    exit_price: Option<f64>,
+    #[arg(long)]
+    notes: Option<String>,
+    #[arg(long)]
+    id: Option<i64>,
+    #[arg(long, default_value = "open")]
+    status: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -327,6 +367,96 @@ async fn main() -> Result<()> {
         let engine = PaperTradingEngine::new(cache.clone());
         let portfolio = engine.status()?;
         print_portfolio_status(&portfolio, today);
+        return Ok(());
+    }
+
+    // ── Decision journal: read/write, no universe needed ─────────────────────
+    if cli.journal_add || cli.journal_list || cli.journal_close || cli.journal_score {
+        use quant_edge::journal::{self, JournalEntry, NewDecision};
+        let today = chrono::Local::now().date_naive();
+
+        async fn last_close(cache: &Cache, ticker: &str, today: NaiveDate) -> Result<f64> {
+            let yahoo = YahooFinance::new(cache.clone());
+            let bars = yahoo.price_history(ticker, today - chrono::Duration::days(10), today).await?;
+            bars.last().map(|b| b.close).context("no recent price data for this ticker")
+        }
+
+        if cli.journal_add {
+            let ticker = cli.ticker.clone().context("--journal-add requires --ticker")?;
+            let thesis = cli.thesis.clone().context("--journal-add requires --thesis \"...\"")?;
+            let holding_days = cli.holding_days.context("--journal-add requires --holding-days")?;
+            let entry_price = match cli.entry_price {
+                Some(p) => p,
+                None => last_close(&cache, &ticker, today).await?,
+            };
+            let log_dir = cli.log_dir.clone().unwrap_or_else(|| quant_edge::forward_test::DEFAULT_DIR.to_string());
+            let model_composite_at_entry = journal::find_model_composite(std::path::Path::new(&log_dir), &ticker, today);
+
+            let id = journal::add(&cache, &NewDecision {
+                ticker: ticker.to_uppercase(), entry_date: today, thesis, expected_holding_days: holding_days,
+                entry_price, model_composite_at_entry,
+            })?;
+            println!("Logged decision #{id}: {} @ {:.2} on {}", ticker.to_uppercase(), entry_price, today);
+            if let Some(c) = model_composite_at_entry {
+                println!("  (model composite around this date: {c:.1})");
+            } else {
+                println!("  (no model score found for this ticker/date in {log_dir} - that's fine, it's optional)");
+            }
+        }
+
+        if cli.journal_close {
+            let id = cli.id.context("--journal-close requires --id N")?;
+            let entries = journal::list(&cache, None)?;
+            let entry = entries.iter().find(|e| e.id == id).with_context(|| format!("no journal entry #{id}"))?;
+            let exit_price = match cli.exit_price {
+                Some(p) => p,
+                None => last_close(&cache, &entry.ticker, today).await?,
+            };
+            journal::close(&cache, id, today, exit_price, cli.notes.as_deref())?;
+            let ret = (exit_price / entry.entry_price - 1.0) * 100.0;
+            println!("Closed #{id}: {} @ {:.2} ({:+.1}% from {:.2} on {})", entry.ticker, exit_price, ret, entry.entry_price, entry.entry_date);
+        }
+
+        if cli.journal_score {
+            let all = journal::list(&cache, None)?;
+            let due: Vec<&JournalEntry> = all.iter().filter(|e| e.is_due(today)).collect();
+            if due.is_empty() {
+                println!("No open entries are past their expected holding period.");
+            } else {
+                println!("Due for review ({} entries):", due.len());
+                for e in &due {
+                    println!("  #{:<4} {:<8} entered {} ({} days ago), thesis: {}", e.id, e.ticker, e.entry_date, e.days_held(today), e.thesis);
+                }
+            }
+            let summary = journal::summarize(&all);
+            if summary.n_closed > 0 {
+                println!();
+                println!("Closed entries so far: {}", summary.n_closed);
+                println!("  Mean return       {:>+7.2}%", summary.mean_return_pct);
+                println!("  Hit rate          {:>7.1}%", summary.hit_rate_pct);
+                if summary.n_agreed_with_model + summary.n_disagreed_with_model > 0 {
+                    println!("  Agreed w/ model   {:>4} calls, mean return {:>+.2}%", summary.n_agreed_with_model, summary.mean_return_when_agreed_pct);
+                    println!("  Disagreed         {:>4} calls, mean return {:>+.2}%", summary.n_disagreed_with_model, summary.mean_return_when_disagreed_pct);
+                }
+            }
+        }
+
+        if cli.journal_list {
+            let status = match cli.status.as_str() {
+                "all" => None,
+                s => Some(s.to_string()),
+            };
+            let entries = journal::list(&cache, status.as_deref())?;
+            if entries.is_empty() {
+                println!("No journal entries.");
+            }
+            for e in &entries {
+                match e.return_pct() {
+                    Some(r) => println!("#{:<4} {:<8} {} -> {}  {:+.1}%   {}", e.id, e.ticker, e.entry_date, e.exit_date.unwrap(), r, e.thesis),
+                    None => println!("#{:<4} {:<8} {} (open, {} days)   {}", e.id, e.ticker, e.entry_date, e.days_held(today), e.thesis),
+                }
+            }
+        }
         return Ok(());
     }
 

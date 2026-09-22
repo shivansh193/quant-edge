@@ -168,6 +168,24 @@ impl Cache {
                 fetched_at TEXT NOT NULL
             );
 
+            -- Decision journal: your own discretionary calls, logged with a
+            -- thesis BEFORE the outcome is known, closed and scored later.
+            -- See journal.rs.
+            CREATE TABLE IF NOT EXISTS decisions (
+                id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+                ticker                 TEXT    NOT NULL,
+                entry_date             TEXT    NOT NULL,
+                thesis                 TEXT    NOT NULL,
+                expected_holding_days  INTEGER NOT NULL,
+                entry_price            REAL    NOT NULL,
+                model_composite_at_entry REAL,
+                status                 TEXT    NOT NULL DEFAULT 'open',  -- 'open' | 'closed'
+                exit_date              TEXT,
+                exit_price             REAL,
+                outcome_notes          TEXT,
+                created_at             TEXT    NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS universe_cache (
                 market     TEXT NOT NULL,
                 tickers    TEXT NOT NULL,
@@ -953,6 +971,68 @@ impl Cache {
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(e.into()),
         }
+    }
+
+    // ── Decision journal ─────────────────────────────────────────────────────
+
+    pub fn insert_decision(&self, d: &crate::journal::NewDecision) -> Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO decisions
+             (ticker, entry_date, thesis, expected_holding_days, entry_price,
+              model_composite_at_entry, status, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'open', datetime('now'))",
+            params![
+                d.ticker, d.entry_date.to_string(), d.thesis, d.expected_holding_days,
+                d.entry_price, d.model_composite_at_entry,
+            ],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    pub fn close_decision(
+        &self,
+        id: i64,
+        exit_date: NaiveDate,
+        exit_price: f64,
+        outcome_notes: Option<&str>,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let n = conn.execute(
+            "UPDATE decisions SET status = 'closed', exit_date = ?1, exit_price = ?2, outcome_notes = ?3
+             WHERE id = ?4 AND status = 'open'",
+            params![exit_date.to_string(), exit_price, outcome_notes, id],
+        )?;
+        anyhow::ensure!(n == 1, "no open decision with id {id}");
+        Ok(())
+    }
+
+    pub fn list_decisions(&self, status: Option<&str>) -> Result<Vec<crate::journal::JournalEntry>> {
+        let conn = self.conn.lock().unwrap();
+        let sql = "SELECT id, ticker, entry_date, thesis, expected_holding_days, entry_price,
+                          model_composite_at_entry, status, exit_date, exit_price, outcome_notes
+                   FROM decisions
+                   WHERE (?1 IS NULL OR status = ?1)
+                   ORDER BY entry_date ASC, id ASC";
+        let mut stmt = conn.prepare_cached(sql)?;
+        let rows = stmt
+            .query_map(params![status], |r| {
+                Ok(crate::journal::JournalEntry {
+                    id: r.get(0)?,
+                    ticker: r.get(1)?,
+                    entry_date: r.get::<_, String>(2)?.parse().unwrap_or_default(),
+                    thesis: r.get(3)?,
+                    expected_holding_days: r.get(4)?,
+                    entry_price: r.get(5)?,
+                    model_composite_at_entry: r.get(6)?,
+                    status: r.get(7)?,
+                    exit_date: r.get::<_, Option<String>>(8)?.and_then(|s| s.parse().ok()),
+                    exit_price: r.get(9)?,
+                    outcome_notes: r.get(10)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
     }
 
     // ── S&P 500 point-in-time membership ──────────────────────────────────────
