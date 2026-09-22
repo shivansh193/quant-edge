@@ -4,6 +4,7 @@ pub mod journal;
 pub mod xirr;
 pub mod holdings;
 pub mod fx;
+pub mod staleness;
 pub mod data;
 pub mod gics;
 pub mod universe;

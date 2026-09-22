@@ -110,6 +110,18 @@ pub async fn run_morning(
     // US section
     out.push_str(&format_picks_section("US PICKS", &us_picks, &cache, today));
 
+    // Data staleness: only worth flagging for names actually being recommended -
+    // a stale price on a ticker nobody's holding isn't actionable.
+    let picked_tickers: Vec<String> = picks.iter().map(|s| s.ticker.clone()).collect();
+    let stale = crate::staleness::find_stale(&cache, &picked_tickers, today, 5);
+    if !stale.is_empty() {
+        out.push_str(&format!("\n  \x1b[33m⚠ STALE DATA\x1b[0m ({} pick(s) with no recent price update)\n", stale.len()));
+        for s in &stale {
+            let age = if s.days_stale == i64::MAX { "no data at all".to_string() } else { format!("{}d old", s.days_stale) };
+            out.push_str(&format!("    {:<14} {}\n", s.ticker, age));
+        }
+    }
+
     // Market context
     out.push_str(&format_market_context(&cache, today).await);
 
