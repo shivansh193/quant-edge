@@ -61,5 +61,5 @@ The existing cache held **0 insider rows, 0 news rows and 0 macro rows**, and
 
 ## Tests
 
-From 0 tests to 113 unit tests (plus 4 opt-in network/fixture tests), and CI
+From 0 tests to 119 unit tests (plus 4 opt-in network/fixture tests), and CI
 (`.github/workflows/ci.yml`) running build, tests and a clippy correctness gate.
