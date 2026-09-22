@@ -122,6 +122,29 @@ pub async fn run_morning(
         }
     }
 
+    // Earnings proximity: live-only (see earnings.rs) - never used in a
+    // backtest. Best-effort per ticker; a failed lookup just means "unknown",
+    // not "no earnings", so it's silently skipped rather than misreported.
+    let earnings_source = YahooFinance::new(cache.clone());
+    let mut earnings_by_ticker: Vec<(String, Vec<chrono::NaiveDate>)> = Vec::new();
+    for ticker in &picked_tickers {
+        if let Ok(dates) = earnings_source.next_earnings_dates(ticker).await {
+            if !dates.is_empty() {
+                earnings_by_ticker.push((ticker.clone(), dates));
+            }
+        }
+    }
+    let near_earnings = crate::earnings::flag_near_earnings(today, &earnings_by_ticker, super::earnings_window_days());
+    if !near_earnings.is_empty() {
+        out.push_str(&format!("\n  \x1b[33m⚠ NEAR EARNINGS\x1b[0m ({} pick(s) within {} day(s) of reporting)\n", near_earnings.len(), super::earnings_window_days()));
+        for f in &near_earnings {
+            let when = if f.days_away == 0 { "today".to_string() }
+                else if f.days_away > 0 { format!("in {}d ({})", f.days_away, f.nearest_date) }
+                else { format!("{}d ago ({})", -f.days_away, f.nearest_date) };
+            out.push_str(&format!("    {:<14} {}\n", f.ticker, when));
+        }
+    }
+
     // Market context
     out.push_str(&format_market_context(&cache, today).await);
 

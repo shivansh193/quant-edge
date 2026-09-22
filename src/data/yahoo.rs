@@ -347,6 +347,36 @@ impl YahooFinance {
     }
 }
 
+impl YahooFinance {
+    /// Upcoming/most-recent earnings date(s) Yahoo currently has on file for
+    /// `ticker`. This is a LIVE-only view (the module reports what Yahoo
+    /// thinks is upcoming right now, not what was known on some past date),
+    /// so it's only valid for the live daily job, never for a backtest —
+    /// using it there would either look ahead or just be wrong. Returns an
+    /// empty vec, not an error, when nothing is scheduled or known.
+    pub async fn next_earnings_dates(&self, ticker: &str) -> Result<Vec<NaiveDate>> {
+        let data = self.fetch_summary_modules(ticker, &["calendarEvents"]).await?;
+        let calendar = data.get("calendarEvents").cloned().unwrap_or_default();
+        Ok(parse_earnings_dates(&calendar))
+    }
+}
+
+/// Parse the `calendarEvents.earnings.earningsDate` array: each entry is
+/// `{"raw": <unix seconds>, "fmt": "YYYY-MM-DD"}`. Malformed or missing
+/// entries are skipped rather than failing the whole parse.
+fn parse_earnings_dates(calendar_events: &serde_json::Value) -> Vec<NaiveDate> {
+    calendar_events
+        .pointer("/earnings/earningsDate")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|e| e.get("raw").and_then(|v| v.as_i64()))
+                .filter_map(|ts| chrono::DateTime::from_timestamp(ts, 0).map(|dt| dt.date_naive()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 #[async_trait]
 impl DataSource for YahooFinance {
     async fn price_history(

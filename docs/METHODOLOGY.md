@@ -114,6 +114,18 @@ Stated plainly, because they bias results:
 * **Non-US fundamentals** have no point-in-time source; NSE tickers are scored
   on the signals that remain.
 * **Yahoo is an unofficial, undocumented API** and can change or rate-limit.
+  A no-key fallback was investigated (Stooq) and found unusable: its CSV
+  endpoint now requires solving a client-side JavaScript proof-of-work
+  challenge before it will serve data, checked directly against `.com`, the
+  `.pl` mirror, and a plausible static subdomain — a real HTTP client cannot
+  satisfy that without a headless browser. A genuine fallback would need a
+  keyed provider (Tiingo, Alpha Vantage) that requires the user's own signup.
+* **Earnings-date awareness is live-only** (`earnings.rs`). Yahoo's
+  `calendarEvents` module reports what it currently believes is the next
+  earnings date, with no point-in-time history of past announcements, so it
+  is wired into `--morning` only and must never be used inside a backtest —
+  doing so would either look ahead or simply be wrong about what was
+  knowable on a historical date.
 * **No FX handling.** Mixed INR/USD universes are treated in percentage terms;
   portfolio-level currency conversion is not modelled.
 * **No interest on cash;** equal weighting only; no shorting; no position limits.

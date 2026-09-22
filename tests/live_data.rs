@@ -145,3 +145,19 @@ async fn usd_inr_rate_is_sane_and_point_in_time() {
     println!("USD/INR ~1y ago: {past}");
     assert!(past > 70.0 && past < 120.0);
 }
+
+#[tokio::test]
+#[ignore = "hits the live Yahoo API"]
+async fn next_earnings_dates_returns_real_data() {
+    let cache = Cache::open(":memory:").unwrap();
+    let yahoo = quant_edge::data::yahoo::YahooFinance::new(cache);
+    let dates = yahoo.next_earnings_dates("AAPL").await.expect("earnings fetch");
+    println!("AAPL upcoming/recent earnings dates: {dates:?}");
+    assert!(!dates.is_empty(), "AAPL reliably has a scheduled earnings date");
+    let today = chrono::Local::now().date_naive();
+    // Whatever Yahoo reports should be in a sane window around today, not
+    // some garbage timestamp from a parsing bug.
+    for d in &dates {
+        assert!((*d - today).num_days().abs() < 400, "implausible earnings date: {d}");
+    }
+}

@@ -47,3 +47,12 @@ pub fn holding_period_days() -> u32 {
         .and_then(|s| s.parse().ok())
         .unwrap_or(25)
 }
+
+/// Read EARNINGS_WINDOW_DAYS from .env (default 3): how close to a known
+/// earnings date counts as "too close to rebalance into".
+pub fn earnings_window_days() -> i64 {
+    std::env::var("EARNINGS_WINDOW_DAYS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(3)
+}
