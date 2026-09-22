@@ -58,12 +58,12 @@ impl LoggedPick {
         Self {
             ticker: s.ticker.clone(),
             rank: s.rank,
-            composite: s.composite,
-            momentum_raw: s.momentum_raw,
-            fundamental_raw: s.fundamental_raw,
-            insider_raw: s.insider_raw,
-            sentiment_raw: s.sentiment_raw,
-            pairs_raw: s.pairs_raw,
+            composite: round_stable(s.composite),
+            momentum_raw: round_stable(s.momentum_raw),
+            fundamental_raw: round_stable(s.fundamental_raw),
+            insider_raw: round_stable(s.insider_raw),
+            sentiment_raw: round_stable(s.sentiment_raw),
+            pairs_raw: round_stable(s.pairs_raw),
             signals_available: s.signals_available(),
             missing_signals: s.availability.missing().into_iter().map(String::from).collect(),
         }
@@ -103,6 +103,27 @@ pub struct ForwardEntry {
     pub prev_hash: String,
     /// SHA-256 over this entry with `hash` blanked.
     pub hash: String,
+}
+
+/// Round to 9 significant decimal digits.
+///
+/// The hash chain must be exactly reproducible from a re-parsed JSON file, but
+/// serde_json 1.0's number parser is not always correctly-rounded: it can
+/// return an f64 one ULP away from the value its OWN serializer wrote (Rust's
+/// std `f64::from_str` parses the identical text exactly; serde_json's
+/// `from_str` does not, verified directly against a real backfill entry -
+/// see docs/AUDIT.md). Composite/signal scores carry no meaningful precision
+/// past a handful of decimal digits anyway, so rounding before it ever
+/// reaches JSON sidesteps the bug entirely rather than depending on a
+/// third-party parser's bit-exactness.
+fn round_stable(v: f64) -> f64 {
+    if !v.is_finite() {
+        return v;
+    }
+    let magnitude = if v == 0.0 { 0.0 } else { v.abs().log10().floor() };
+    let decimals = (8.0 - magnitude).clamp(0.0, 12.0);
+    let scale = 10f64.powf(decimals);
+    (v * scale).round() / scale
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -193,7 +214,7 @@ pub fn record(dir: &Path, input: &LogInput) -> Result<ForwardEntry> {
         code_version: code_version(),
         strategy: input.strategy.to_string(),
         macro_on: input.scores.first().map_or(true, |s| s.macro_on),
-        vix: input.vix,
+        vix: input.vix.map(round_stable),
         universe_size: input.scores.len(),
         universe_hash: universe_hash(&tickers),
         picks: input.picks.iter().map(LoggedPick::from_score).collect(),
@@ -202,7 +223,7 @@ pub fn record(dir: &Path, input: &LogInput) -> Result<ForwardEntry> {
             .iter()
             .map(|s| RankedName {
                 ticker: s.ticker.clone(),
-                composite: s.composite,
+                composite: round_stable(s.composite),
                 signals_available: s.signals_available(),
             })
             .collect(),
@@ -231,18 +252,23 @@ pub fn record_best_effort(
         return;
     }
     let dir = std::env::var("FORWARD_LOG_DIR").unwrap_or_else(|_| DEFAULT_DIR.to_string());
-    let view = AsOf::new(cache, as_of);
-    let data_through = scores
-        .iter()
-        .filter_map(|s| view.last_bar(&s.ticker).map(|b| b.date))
-        .max()
-        .unwrap_or(as_of);
+    let data_through = data_through(cache, scores, as_of);
     let vix = None; // regime flag is recorded; the level is informational only
     let input = LogInput { as_of, data_through, strategy, scores, picks, vix };
     match record(Path::new(&dir), &input) {
         Ok(_) => {}
         Err(e) => warn!("forward-test log not written: {e:#}"),
     }
+}
+
+/// Latest price bar (on/before `as_of`) any scored name had: what the signals could see.
+pub fn data_through(cache: &Cache, scores: &[SignalScore], as_of: NaiveDate) -> NaiveDate {
+    let view = AsOf::new(cache, as_of);
+    scores
+        .iter()
+        .filter_map(|s| view.last_bar(&s.ticker).map(|b| b.date))
+        .max()
+        .unwrap_or(as_of)
 }
 
 fn code_version() -> Option<String> {
@@ -312,6 +338,9 @@ pub struct Outcome {
     pub benchmark_return: Option<f64>,
     /// `basket_return - benchmark_return`.
     pub excess: Option<f64>,
+    /// Cross-sectional rank IC of the WHOLE logged ranking vs. forward return
+    /// (needs >= 20 names with matured prices). Far less noisy than the top-N basket.
+    pub rank_ic: Option<f64>,
 }
 
 /// Return of buying at the open of the first bar after `after` and selling at
@@ -336,12 +365,21 @@ pub fn evaluate_entry(
 ) -> Option<Outcome> {
     let bench = benchmark.and_then(|b| hold_return(b, entry.data_through, horizon));
 
+    let (mut xs, mut ys) = (Vec::new(), Vec::new());
+    for r in &entry.ranking {
+        if let Some((_, _, ret)) = prices.get(&r.ticker).and_then(|s| hold_return(s, entry.data_through, horizon)) {
+            xs.push(r.composite);
+            ys.push(ret);
+        }
+    }
+    let rank_ic = if xs.len() >= 20 { ic::spearman(&xs, &ys) } else { None };
+
     if entry.picks.is_empty() {
         // Cash: return 0, dated by the benchmark's calendar.
         let (entry_date, exit_date, b) = bench?;
         return Some(Outcome {
             as_of: entry.as_of, entry_date, exit_date, n_picks: 0, in_cash: true,
-            basket_return: 0.0, benchmark_return: Some(b), excess: Some(-b),
+            basket_return: 0.0, benchmark_return: Some(b), excess: Some(-b), rank_ic,
         });
     }
 
@@ -368,6 +406,7 @@ pub fn evaluate_entry(
         basket_return: basket,
         benchmark_return: bench.map(|b| b.2),
         excess: bench.map(|b| basket - b.2),
+        rank_ic,
     })
 }
 
@@ -380,11 +419,17 @@ pub struct EvalSummary {
     pub hit_rate: f64,
     pub excess_t_stat: f64,
     pub cash_entries: usize,
+    /// Mean cross-sectional rank IC over entries that have one.
+    pub mean_ic: f64,
+    pub ic_t_stat: f64,
+    pub ic_n: usize,
 }
 
 pub fn summarize(outcomes: &[Outcome]) -> EvalSummary {
     let excess: Vec<f64> = outcomes.iter().filter_map(|o| o.excess).collect();
     let s: IcSummary = ic::summarize(&excess); // mean / std / t-stat of a series
+    let ics: Vec<f64> = outcomes.iter().filter_map(|o| o.rank_ic).collect();
+    let ic_s: IcSummary = ic::summarize(&ics);
     EvalSummary {
         n: outcomes.len(),
         mean_basket: if outcomes.is_empty() {
@@ -396,6 +441,9 @@ pub fn summarize(outcomes: &[Outcome]) -> EvalSummary {
         hit_rate: s.hit_rate,
         excess_t_stat: s.t_stat,
         cash_entries: outcomes.iter().filter(|o| o.in_cash).count(),
+        mean_ic: ic_s.mean,
+        ic_t_stat: ic_s.t_stat,
+        ic_n: ic_s.n,
     }
 }
 
@@ -415,7 +463,7 @@ pub async fn evaluate(
 
     let mut tickers: Vec<String> = entries
         .iter()
-        .flat_map(|e| e.picks.iter().map(|p| p.ticker.clone()))
+        .flat_map(|e| e.picks.iter().map(|p| p.ticker.clone()).chain(e.ranking.iter().map(|r| r.ticker.clone())))
         .collect();
     tickers.sort();
     tickers.dedup();
@@ -452,17 +500,16 @@ pub async fn evaluate(
 mod tests {
     use super::*;
     use crate::data::prices::test_bar;
-    use crate::signals::{composite_score, SignalAvailability, SignalWeights};
 
     fn d(s: &str) -> NaiveDate {
         s.parse().unwrap()
     }
 
     fn score(t: &str, raw: f64, macro_on: bool) -> SignalScore {
-        let mut s = composite_score(
+        let mut s = crate::signals::composite_score(
             t, "Ind", raw, 0.0, 0.0, 0.0, 0.0, macro_on,
-            &SignalWeights { momentum: 1.0, fundamental: 0.0, insider: 0.0, sentiment: 0.0, pairs: 0.0 },
-            &SignalAvailability { momentum: true, ..Default::default() },
+            &crate::signals::SignalWeights { momentum: 1.0, fundamental: 0.0, insider: 0.0, sentiment: 0.0, pairs: 0.0 },
+            &crate::signals::SignalAvailability { momentum: true, ..Default::default() },
         );
         s.rank = 1;
         s
@@ -483,7 +530,64 @@ mod tests {
         record(dir, &LogInput { as_of: d(date), data_through: d(date) - Duration::days(1), strategy: "test", scores: &scores, picks, vix: None })
     }
 
-    // ── integrity ─────────────────────────────────────────────────────────────
+    #[test]
+    fn hash_chain_survives_serde_jsons_float_parsing_imprecision() {
+        // Regression: serde_json 1.0's deserializer is not always correctly
+        // rounded. This exact bit pattern round-trips correctly through
+        // Rust's own f64::from_str but comes back ONE ULP off through
+        // serde_json::from_str - found via a real 30-day backfill run whose
+        // very first entry failed --forward-verify. round_stable() must
+        // remove that last-bit ambiguity before it ever reaches JSON.
+        let treacherous = f64::from_bits(0x4027db518d26fdea);
+        let text = serde_json::to_string(&treacherous).unwrap();
+        let reparsed: f64 = serde_json::from_str(&text).unwrap();
+        assert_ne!(
+            reparsed.to_bits(), treacherous.to_bits(),
+            "serde_json now round-trips this value exactly; round_stable()'s reasoning              may no longer be needed, but keep it (harmless) and update this test's comment"
+        );
+        assert_eq!(round_stable(reparsed), round_stable(treacherous));
+
+        let dir = tmp_dir("float_precision");
+        let scores = vec![score("A", 0.1, true), score("B", 0.837465219, true)];
+        record(&dir, &LogInput {
+            as_of: d("2024-03-04"), data_through: d("2024-03-01"), strategy: "x",
+            scores: &scores, picks: &[], vix: Some(treacherous),
+        }).unwrap();
+        let v = verify(&dir).unwrap();
+        assert!(v.ok(), "{v:?}");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn round_stable_preserves_meaningful_precision_and_handles_edge_cases() {
+        assert_eq!(round_stable(0.0), 0.0);
+        assert!(round_stable(f64::NAN).is_nan());
+        assert_eq!(round_stable(f64::INFINITY), f64::INFINITY);
+        assert!((round_stable(0.123456789123) - 0.12345679).abs() < 1e-9, "{}", round_stable(0.123456789123));
+        assert!((round_stable(75.0) - 75.0).abs() < 1e-9);
+        assert!((round_stable(-0.837465219321) - -0.83746522).abs() < 1e-8, "{}", round_stable(-0.837465219321));
+    }
+
+    #[test]
+    fn a_realistic_full_size_entry_verifies_reliably() {
+        // 317 names is roughly a real S&P-500-sized ranking; non-round
+        // composites are the norm, not the exception, for real signal output.
+        let scores: Vec<SignalScore> = (0..317)
+            .map(|i| {
+                let raw = ((i as f64) * 0.0137 - 1.0).sin() * 0.913 + (i as f64).sqrt() * 1e-7;
+                score(&format!("TICK{i:04}"), raw, true)
+            })
+            .collect();
+        let picks: Vec<SignalScore> = scores.iter().take(30).cloned().collect();
+        let dir = tmp_dir("full_size");
+        record(&dir, &LogInput {
+            as_of: d("2024-03-04"), data_through: d("2024-03-01"), strategy: "large",
+            scores: &scores, picks: &picks, vix: Some(17.35),
+        }).unwrap();
+        let v = verify(&dir).unwrap();
+        assert!(v.ok(), "{v:?}");
+        std::fs::remove_dir_all(dir).ok();
+    }
 
     #[test]
     fn a_fresh_chain_verifies() {
@@ -672,6 +776,7 @@ mod tests {
         let mk = |ex: f64, cash: bool| Outcome {
             as_of: d("2024-03-01"), entry_date: d("2024-03-04"), exit_date: d("2024-03-06"),
             n_picks: if cash { 0 } else { 3 }, in_cash: cash, basket_return: ex, benchmark_return: Some(0.0), excess: Some(ex),
+            rank_ic: Some(if ex > 0.0 { 0.05 } else { -0.02 }),
         };
         let s = summarize(&[mk(0.02, false), mk(0.04, false), mk(-0.01, false), mk(0.0, true)]);
         assert_eq!(s.n, 4);
@@ -679,5 +784,29 @@ mod tests {
         assert!((s.hit_rate - 0.5).abs() < 1e-9);
         assert!((s.mean_excess - 0.0125).abs() < 1e-9);
         assert_eq!(summarize(&[]).n, 0);
+        assert_eq!(s.ic_n, 4);
+        assert!(s.mean_ic > 0.0);
+    }
+
+    #[test]
+    fn rank_ic_uses_the_whole_ranking_not_just_the_picks() {
+        // 25 names; composite order == forward-return order, so IC ~ +1 even
+        // though only one name is a "pick".
+        let mut store = PriceStore::new();
+        let mut ranking = Vec::new();
+        for i in 0..25 {
+            let t = format!("T{i:02}");
+            let end = 100.0 + i as f64; // higher composite -> higher return
+            store.insert(t.clone(), series_from(&[("2024-03-04", 100.0, 100.0), ("2024-03-05", 100.0, 100.0), ("2024-03-06", 100.0, end)]));
+            ranking.push(RankedName { ticker: t, composite: 40.0 + i as f64, signals_available: 3 });
+        }
+        let mut e = entry_with(&["T24"], "2024-03-04");
+        e.ranking = ranking;
+        let out = evaluate_entry(&e, &store, None, 2).unwrap();
+        assert!(out.rank_ic.unwrap() > 0.99, "{:?}", out.rank_ic);
+
+        // Too few names -> no IC rather than a noisy one.
+        e.ranking.truncate(10);
+        assert!(evaluate_entry(&e, &store, None, 2).unwrap().rank_ic.is_none());
     }
 }

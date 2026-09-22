@@ -10,22 +10,26 @@ use crate::universe::{AutoUniverseBuilder, UniverseBuilder, UniverseConfig, Mark
 
 use super::{holding_period_days, min_score_threshold, score_based_picks};
 
-/// Run the morning report. Returns the formatted output string (also saved to logs/).
-pub async fn run_morning(cache: Cache, taxonomy: &GicsTaxonomy, today: NaiveDate) -> Result<String> {
-    let threshold = min_score_threshold();
-    let hold_days = holding_period_days();
-
-    // ── 1. Auto universe ──────────────────────────────────────────────────────
+/// Build the daily universe: Nifty 500 + S&P 500, or S&P 500 only when
+/// `us_only` (the US trading day).
+pub async fn build_auto_universe(
+    cache: &Cache,
+    taxonomy: &GicsTaxonomy,
+    us_only: bool,
+) -> Result<crate::universe::builder::Universe> {
     let auto_builder = AutoUniverseBuilder::new(cache.clone());
-    let tickers = auto_builder
+    let mut tickers = auto_builder
         .get_all_tickers()
         .await
         .context("Auto universe fetch failed")?;
+    if us_only {
+        tickers.retain(|t| !t.ends_with(".NS"));
+    }
 
     let source = YahooFinance::new(cache.clone());
     let ub = UniverseBuilder::new(&source, taxonomy);
     let config = UniverseConfig {
-        market:                  Market::Both,
+        market:                  if us_only { Market::NYSE } else { Market::Both },
         cap_filter:              CapFilter::Mixed,
         n_industries:            100,
         exclude_industry_codes:  vec![],
@@ -41,6 +45,21 @@ pub async fn run_morning(cache: Cache, taxonomy: &GicsTaxonomy, today: NaiveDate
         .context("GICS enrichment failed")?;
 
     universe.trim_to_n_industries(100, &[]);
+    Ok(universe)
+}
+
+/// Run the morning report. Returns the formatted output string (also saved to logs/).
+pub async fn run_morning(
+    cache: Cache,
+    taxonomy: &GicsTaxonomy,
+    today: NaiveDate,
+    us_only: bool,
+) -> Result<String> {
+    let threshold = min_score_threshold();
+    let hold_days = holding_period_days();
+
+    // ── 1. Universe ───────────────────────────────────────────────────────────
+    let universe = build_auto_universe(&cache, taxonomy, us_only).await?;
 
     // ── 2. Run picking engine ─────────────────────────────────────────────────
     let engine = PickingEngine::new(cache.clone());

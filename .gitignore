@@ -42,3 +42,6 @@ out/
 
 # NOTE: forward_log/ is deliberately NOT ignored - commit it, so git
 # timestamps each day's picks externally.
+
+# Point-in-time replay output (a backtest; must not be mixed with forward_log/)
+backfill_log/

@@ -210,6 +210,20 @@ struct Cli {
     /// Holding horizon in trading days for --forward-eval.
     #[arg(long, default_value_t = 21)]
     horizon: usize,
+
+    /// Restrict --morning / --backfill-days to the US market (S&P 500).
+    #[arg(long)]
+    us: bool,
+
+    /// Replay the daily job over the last N calendar days, point-in-time, into a
+    /// SEPARATE log (default backfill_log/). A backtest, not forward evidence.
+    #[arg(long)]
+    backfill_days: Option<i64>,
+
+    /// Log directory for --forward-verify/--forward-eval/--backfill-days
+    /// (default: $FORWARD_LOG_DIR or forward_log; backfill defaults to backfill_log).
+    #[arg(long)]
+    log_dir: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -318,8 +332,10 @@ async fn main() -> Result<()> {
 
     // ── Forward-test log: read-only, no universe needed ──────────────────────
     if cli.forward_verify || cli.forward_eval {
-        let dir = std::env::var("FORWARD_LOG_DIR")
-            .unwrap_or_else(|_| quant_edge::forward_test::DEFAULT_DIR.to_string());
+        let dir = cli.log_dir.clone().unwrap_or_else(|| {
+            std::env::var("FORWARD_LOG_DIR")
+                .unwrap_or_else(|_| quant_edge::forward_test::DEFAULT_DIR.to_string())
+        });
         let dir = std::path::Path::new(&dir);
 
         let v = quant_edge::forward_test::verify(dir)?;
@@ -344,6 +360,12 @@ async fn main() -> Result<()> {
                 println!("  Mean excess vs index {:>+7.2}%   (t = {:+.2})", sum.mean_excess * 100.0, sum.excess_t_stat);
                 println!("  Beat the index       {:>7.0}%   of entries", sum.hit_rate * 100.0);
                 println!("  Recommended cash     {:>8}   entries", sum.cash_entries);
+                if sum.ic_n > 0 {
+                    println!(
+                        "  Whole-ranking rank IC {:>+6.4}   (t = {:+.2}, {} entries; overlapping windows inflate t)",
+                        sum.mean_ic, sum.ic_t_stat, sum.ic_n
+                    );
+                }
                 if sum.n < 30 {
                     println!("  (fewer than 30 matured entries: too few to conclude anything yet)");
                 }
@@ -366,10 +388,24 @@ async fn main() -> Result<()> {
     // ── Phase 7 morning report: builds auto-universe internally ──────────────
     if cli.morning {
         let today = chrono::Local::now().date_naive();
-        let output = run_morning(cache, &taxonomy, today)
+        let output = run_morning(cache, &taxonomy, today, cli.us)
             .await
             .context("Morning report failed")?;
         print!("{}", output);
+        return Ok(());
+    }
+
+    // ── Backfill: point-in-time replay of the daily job (a backtest) ─────────
+    if let Some(days) = cli.backfill_days {
+        let last_day = chrono::Local::now().date_naive() - chrono::Duration::days(1);
+        let dir = cli.log_dir.clone().unwrap_or_else(|| quant_edge::daily::backfill::BACKFILL_DIR.to_string());
+        let msg = quant_edge::daily::backfill::run_backfill(
+            cache, &taxonomy, last_day, days, cli.us, std::path::Path::new(&dir),
+        )
+        .await
+        .context("Backfill failed")?;
+        println!("{msg}");
+        println!("Evaluate with: quant-edge --forward-eval --log-dir {dir} --horizon 5");
         return Ok(());
     }
 

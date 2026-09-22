@@ -1,7 +1,8 @@
 pub mod morning;
 pub mod evening;
+pub mod backfill;
 
-pub use morning::run_morning;
+pub use morning::{build_auto_universe, run_morning};
 pub use evening::run_evening;
 
 use crate::signals::SignalScore;

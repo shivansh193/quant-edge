@@ -601,10 +601,13 @@ fn market_matches(exchange: &str, filter: &Market) -> bool {
             matches!(exchange.to_uppercase().as_str(), "NSI" | "NSE" | "BSE")
         }
         Market::NYSE => {
-            matches!(
-                exchange.to_uppercase().as_str(),
-                "NYQ" | "NMS" | "NYSE" | "NGM" | "NCM" | "NASDAQ"
-            )
+            // Yahoo reports exchange names like "NYSE", "NasdaqGS", "NasdaqGM",
+            // "NasdaqCM" (and short codes NYQ/NMS/NGM/NCM). The old exact match on
+            // "NASDAQ" silently dropped every Nasdaq-listed stock (AAPL, MSFT, NVDA...).
+            let e = exchange.to_uppercase();
+            matches!(e.as_str(), "NYQ" | "NMS" | "NYSE" | "NGM" | "NCM" | "PCX" | "ASE" | "BTS" | "CBOE US")
+                || e.starts_with("NASDAQ")
+                || e.starts_with("NYSE")
         }
     }
 }
@@ -615,5 +618,28 @@ fn cap_matches(tier: &Option<MarketCap>, filter: &CapFilter) -> bool {
         CapFilter::SmallCap => matches!(tier, Some(MarketCap::SmallCap)),
         CapFilter::MidCap => matches!(tier, Some(MarketCap::MidCap)),
         CapFilter::LargeCap => matches!(tier, Some(MarketCap::LargeCap)),
+    }
+}
+#[cfg(test)]
+mod market_tests {
+    use super::*;
+
+    #[test]
+    fn us_filter_includes_nasdaq_listings_under_yahoos_real_exchange_names() {
+        // Names as stored in the cache: 339 NYSE, 160 NasdaqGS, 1 NasdaqGM, ...
+        for ex in ["NYSE", "NasdaqGS", "NasdaqGM", "NasdaqCM", "NMS", "NYQ", "Cboe US"] {
+            assert!(market_matches(ex, &Market::NYSE), "{ex} should be US");
+            assert!(!market_matches(ex, &Market::NSE), "{ex} is not NSE");
+        }
+    }
+
+    #[test]
+    fn nse_and_us_filters_are_disjoint() {
+        for ex in ["NSE", "NSI", "BSE"] {
+            assert!(market_matches(ex, &Market::NSE));
+            assert!(!market_matches(ex, &Market::NYSE));
+        }
+        assert!(!market_matches("UNKNOWN", &Market::NYSE));
+        assert!(market_matches("UNKNOWN", &Market::Both));
     }
 }

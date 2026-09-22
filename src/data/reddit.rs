@@ -13,6 +13,20 @@ use super::types::RedditSnapshot;
 const REDDIT_DELAY_MS: u64 = 1_000; // Reddit rate limit: 1 req/sec for anon
 const SUBREDDITS: &[&str] = &["wallstreetbets", "stocks"];
 
+/// Flip to true only once the client is authenticated (OAuth).
+const FETCH_DISABLED: bool = true;
+
+/// Why live fetching is off. Verified directly (anonymous curl, no auth
+/// headers): `reddit.com/r/.../search.json` now returns HTTP 403 for every
+/// request, in well under a second — an outright block, not a timeout. The
+/// app was still attempting it for every ticker x 2 subreddits x every day
+/// (each paying REDDIT_DELAY_MS), for zero data: 0 new rows were written
+/// across a 30-day backfill that ran for hours. Needs an OAuth client
+/// (Reddit's "script" app type + password grant, or a read-only token) before
+/// this can be re-enabled.
+pub const FETCH_DISABLED_REASON: &str =
+    "Reddit anonymous search returns HTTP 403 (confirmed live); needs an OAuth client";
+
 pub struct RedditFetcher {
     client: Client,
     cache: Cache,
@@ -55,9 +69,10 @@ impl RedditFetcher {
     ) -> Result<Vec<RedditSnapshot>> {
         let view = AsOf::new(&self.cache, as_of);
 
-        // Reddit search only reflects the present. A snapshot is only valid on
-        // the day it was taken, so for a past date serve stored snapshots only.
-        if is_historical(as_of) || self.cache.has_reddit_cache(ticker, 12) {
+        // Serve only what is already stored. Never fetch live: see
+        // FETCH_DISABLED_REASON. Historical dates couldn't be fetched live
+        // anyway (a snapshot is only valid on the day it was taken).
+        if FETCH_DISABLED || is_historical(as_of) || self.cache.has_reddit_cache(ticker, 12) {
             return view.reddit_snapshots(ticker, days as i64);
         }
 

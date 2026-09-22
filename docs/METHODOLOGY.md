@@ -31,7 +31,7 @@ nothing after it is returned.
 | **Fundamentals** | US issuers: SEC XBRL filings, each value keyed by its **filing date**; restatements apply only once filed (`data/sec_facts.rs`). Non-US (e.g. `.NS`): none historically. | US only |
 | **Insider trades** (EDGAR Form 4) | Filing date is stored and enforced. Open-market purchases/sales only (codes P/S). | Only history already cached; accumulates going forward |
 | **News** (GDELT) | **Disabled.** Its article-list mode returns no tone and it allows 1 request / 5 s, so it cannot serve a 400-name universe. The signal reports "no data" and is excluded from the composite. A working version needs GDELT's TimelineTone mode and a shortlist. | No |
-| **Reddit** | A snapshot is valid only on the day it was taken. Rows collected later than their label (from historical runs) are hidden from past dates. | Only what was collected live; accumulates going forward |
+| **Reddit** | **Disabled.** The anonymous search endpoint now returns HTTP 403 for every request (confirmed live, not a timeout). Needs an OAuth client. A snapshot is valid only on the day it was taken; rows collected later than their label are also hidden from past dates. | No |
 | **Macro** (VIX, 10Y) | Yes — daily `^VIX` / `^TNX` from Yahoo (FRED as fallback); these are not revised. If both are missing the gate is fail-open **and warns loudly**. | Yes |
 | **Correlation matrix** | Cache lookups are bound to `as_of` (never loads a later matrix). | Yes |
 
@@ -111,6 +111,7 @@ Stated plainly, because they bias results:
   portfolio-level currency conversion is not modelled.
 * **No interest on cash;** equal weighting only; no shorting; no position limits.
 * **Overlapping forward windows** in signal validation make t-stats indicative.
+* **`--backfill-days` clamps its end date** to stay outside the live-fetch window (`LIVE_GRACE_DAYS`, currently 3 days) and gives each day a hard wall-clock budget, so it can never itself trigger the live-fetch stall described in docs/AUDIT.md.
 * **Debt/equity** uses the latest long-term + current debt tags, which may come
   from slightly different balance-sheet dates.
 * Tax modelling ignores loss carry-forward, wash sales, surcharge and cess.

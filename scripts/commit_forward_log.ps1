@@ -4,7 +4,8 @@ $ErrorActionPreference = "Stop"
 Set-Location "$PSScriptRoot\.."
 $Dir = if ($env:FORWARD_LOG_DIR) { $env:FORWARD_LOG_DIR } else { "forward_log" }
 
-& .\target\release\quant-edge.exe --forward-verify   # refuse to commit a broken chain
+$Exe = if (Test-Path ".\target\release\quant-edge.exe") { ".\target\release\quant-edge.exe" } else { ".\target\debug\quant-edge.exe" }
+& $Exe --forward-verify   # refuse to commit a broken chain
 if ($LASTEXITCODE -ne 0) { throw "forward log failed verification" }
 
 git add $Dir
