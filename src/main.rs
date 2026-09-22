@@ -264,6 +264,20 @@ struct Cli {
     id: Option<i64>,
     #[arg(long, default_value = "open")]
     status: String,
+
+    // ── Real holdings ─────────────────────────────────────────────────────────
+
+    /// Import a broker trade history (CSV: date,ticker,side,quantity,price[,fees] —
+    /// see src/holdings.rs for the schema) and report holdings, realised P&L
+    /// and portfolio XIRR. Combine with --reconcile to compare against the
+    /// most recent forward-log picks.
+    #[arg(long)]
+    holdings_import: Option<String>,
+
+    /// With --holdings-import: also report which held tickers the model
+    /// currently likes, doesn't, and which of its picks you don't hold.
+    #[arg(long)]
+    reconcile: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -367,6 +381,73 @@ async fn main() -> Result<()> {
         let engine = PaperTradingEngine::new(cache.clone());
         let portfolio = engine.status()?;
         print_portfolio_status(&portfolio, today);
+        return Ok(());
+    }
+
+    // ── Real holdings: read-only, no universe needed ──────────────────────────
+    if let Some(path) = &cli.holdings_import {
+        use quant_edge::holdings::{compute_holdings, parse_trades_csv, portfolio_xirr, reconcile};
+        let today = chrono::Local::now().date_naive();
+
+        let text = std::fs::read_to_string(path).with_context(|| format!("reading {path}"))?;
+        let trades = parse_trades_csv(&text).context("parsing the trade history")?;
+        anyhow::ensure!(!trades.is_empty(), "no trades found in {path}");
+        let holdings = compute_holdings(&trades);
+
+        println!();
+        println!("\x1b[1m\x1b[97mHoldings ({} trade(s) imported)\x1b[0m", trades.len());
+        println!("{:<10} {:>12} {:>12} {:>12} {:>14} {:>14}", "Ticker", "Qty", "Avg Cost", "Last", "Unrealised", "Realised");
+
+        let yahoo = YahooFinance::new(cache.clone());
+        let mut current_prices = std::collections::HashMap::new();
+        let mut tickers: Vec<&String> = holdings.keys().collect();
+        tickers.sort();
+        for ticker in &tickers {
+            let h = &holdings[*ticker];
+            let last = if h.quantity > 0.0 {
+                match yahoo.price_history(ticker, today - chrono::Duration::days(10), today).await {
+                    Ok(bars) if !bars.is_empty() => {
+                        let px = bars.last().unwrap().close;
+                        current_prices.insert((*ticker).clone(), px);
+                        Some(px)
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            let unrealized = last.map(|px| h.quantity * (px - h.avg_cost));
+            println!(
+                "{:<10} {:>12.2} {:>12.2} {:>12} {:>14} {:>14.2}",
+                ticker, h.quantity, h.avg_cost,
+                last.map(|p| format!("{p:.2}")).unwrap_or_else(|| "n/a".to_string()),
+                unrealized.map(|u| format!("{u:+.2}")).unwrap_or_else(|| "n/a".to_string()),
+                h.realized_pnl,
+            );
+        }
+
+        match portfolio_xirr(&trades, &current_prices, today) {
+            Ok(Some(rate)) => println!("\nPortfolio XIRR: {:+.2}%", rate * 100.0),
+            Ok(None) => println!("\nPortfolio XIRR: not computable (need both an outflow and an inflow)"),
+            Err(e) => println!("\nPortfolio XIRR: unavailable - {e:#}"),
+        }
+
+        if cli.reconcile {
+            let log_dir = cli.log_dir.clone().unwrap_or_else(|| quant_edge::forward_test::DEFAULT_DIR.to_string());
+            match quant_edge::forward_test::read_all(std::path::Path::new(&log_dir)) {
+                Ok(entries) if !entries.is_empty() => {
+                    let latest = entries.last().unwrap();
+                    let model_picks: std::collections::HashSet<String> =
+                        latest.picks.iter().map(|p| p.ticker.clone()).collect();
+                    let r = reconcile(&holdings, &model_picks);
+                    println!("\n\x1b[1mReconciliation vs. {} picks ({})\x1b[0m", latest.as_of, log_dir);
+                    println!("  Held and the model likes:  {}", if r.in_both.is_empty() { "none".into() } else { r.in_both.join(", ") });
+                    println!("  Held, model doesn't pick:  {}", if r.only_held.is_empty() { "none".into() } else { r.only_held.join(", ") });
+                    println!("  Model likes, you don't hold: {}", if r.only_model.is_empty() { "none".into() } else { r.only_model.join(", ") });
+                }
+                _ => println!("\nReconciliation: no forward-log entries found in {log_dir} yet"),
+            }
+        }
         return Ok(());
     }
 

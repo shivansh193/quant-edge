@@ -1,6 +1,8 @@
 pub mod costs;
 pub mod risk;
 pub mod journal;
+pub mod xirr;
+pub mod holdings;
 pub mod data;
 pub mod gics;
 pub mod universe;
