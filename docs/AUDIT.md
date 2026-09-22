@@ -39,6 +39,12 @@ watching the test fail (mutation check), not just by the test passing.
 | 18 | Morning handler derived the regime from `picks.first()` and defaulted to risk-on when empty — which the new gate makes common | Regime read from the full ranking | (found while fixing #15) |
 | 19 | Tie-breaks depended on `HashMap` order, so identical runs could differ | Fixed industry order + ticker tie-break | `ties_break_by_ticker…`, `results_are_deterministic` |
 
+## Survivorship bias in `--backfill-days --us`
+
+| # | Issue | Fix | Verified by |
+|---|---|---|---|
+| 27 | Backfill scored every historical date against TODAY's S&P 500 list, so names removed since (bankruptcy, acquisition, demotion) were invisible on every day, flattering every result | Point-in-time membership from a community-maintained dataset (fja05680/sp500), resolved once as a superset per run and filtered per day in memory (no extra network calls); falls back to today's list with a warning if the dataset is unreachable | Live: verified against a known fact (TSLA absent from the 2020-12-01 snapshot, present from 2021-01-01 — it joined 2020-12-21); 5 cache-layer unit tests; backfill output states which universe mode was used |
+
 ## Data sources that had never worked
 
 The existing cache held **0 insider rows, 0 news rows and 0 macro rows**, and

@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use chrono::NaiveDate;
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use super::source::{AssetInfo, FundamentalSnapshot, MarketCap, PriceBar};
 use super::sec_facts::PitFact;
+use crate::universe::historical_membership::MembershipSnapshot;
 use super::types::{InsiderTrade, IndustryCorrelation, MacroDataPoint, NewsItem, RedditSnapshot};
 
 /// One row from the strategy_runs leaderboard table.
@@ -157,6 +158,15 @@ impl Cache {
                 PRIMARY KEY (ticker, concept, period_start, period_end, filed)
             );
             CREATE INDEX IF NOT EXISTS idx_pit_facts_lookup ON pit_facts (ticker, filed);
+
+            -- One row per S&P 500 membership CHANGE event (not one row per
+            -- day): tickers is the full member list effective from date
+            -- until the next row. See universe::historical_membership.
+            CREATE TABLE IF NOT EXISTS sp500_membership (
+                date       TEXT NOT NULL PRIMARY KEY,
+                tickers    TEXT NOT NULL,
+                fetched_at TEXT NOT NULL
+            );
 
             CREATE TABLE IF NOT EXISTS universe_cache (
                 market     TEXT NOT NULL,
@@ -945,6 +955,81 @@ impl Cache {
         }
     }
 
+    // ── S&P 500 point-in-time membership ──────────────────────────────────────
+
+    pub fn has_sp500_membership_cache(&self, max_age_days: i64) -> bool {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT COUNT(*) FROM sp500_membership WHERE fetched_at >= datetime('now', ?1)",
+            params![format!("-{} days", max_age_days)],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap_or(0)
+            > 0
+    }
+
+    pub fn save_sp500_membership(&self, snapshots: &[MembershipSnapshot]) -> Result<()> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        {
+            let mut stmt = tx.prepare_cached(
+                "INSERT OR REPLACE INTO sp500_membership (date, tickers, fetched_at)
+                 VALUES (?1, ?2, datetime('now'))",
+            )?;
+            for s in snapshots {
+                stmt.execute(params![s.date.to_string(), s.tickers.join(",")])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// The membership row effective on `as_of`: the latest change-date <= as_of,
+    /// or (if as_of precedes the dataset entirely) the earliest row on file.
+    pub fn sp500_membership_as_of(&self, as_of: NaiveDate) -> Result<Vec<String>> {
+        let conn = self.conn.lock().unwrap();
+        let row: Option<String> = conn
+            .query_row(
+                "SELECT tickers FROM sp500_membership WHERE date <= ?1 ORDER BY date DESC LIMIT 1",
+                params![as_of.to_string()],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let row = match row {
+            Some(t) => t,
+            None => conn
+                .query_row(
+                    "SELECT tickers FROM sp500_membership ORDER BY date ASC LIMIT 1",
+                    [],
+                    |r| r.get(0),
+                )
+                .optional()?
+                .unwrap_or_default(),
+        };
+        Ok(row.split(',').filter(|s| !s.is_empty()).map(|s| s.to_string()).collect())
+    }
+
+    /// Union of every ticker that was a member at any change-event whose
+    /// effective range overlaps [from, to] (the row just before `from` may
+    /// already have been in effect at `from`, so it is included too).
+    pub fn sp500_membership_union(&self, from: NaiveDate, to: NaiveDate) -> Result<std::collections::HashSet<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare_cached(
+            "SELECT tickers FROM sp500_membership
+             WHERE date <= ?2 AND date >= (
+                 SELECT COALESCE(MAX(date), '0000-01-01') FROM sp500_membership WHERE date <= ?1
+             )",
+        )?;
+        let rows: Vec<String> = stmt
+            .query_map(params![from.to_string(), to.to_string()], |r| r.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut set = std::collections::HashSet::new();
+        for row in rows {
+            set.extend(row.split(',').filter(|s| !s.is_empty()).map(|s| s.to_string()));
+        }
+        Ok(set)
+    }
+
     // ── Strategy runs (leaderboard) ───────────────────────────────────────────
 
     /// Persist one completed backtest result for the leaderboard.
@@ -1031,5 +1116,73 @@ impl Cache {
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e)                           => Err(e.into()),
         }
+    }
+}
+#[cfg(test)]
+mod sp500_membership_tests {
+    use super::*;
+    use crate::universe::historical_membership::MembershipSnapshot;
+
+    fn d(s: &str) -> NaiveDate {
+        s.parse().unwrap()
+    }
+
+    fn snap(date: &str, tickers: &[&str]) -> MembershipSnapshot {
+        MembershipSnapshot { date: d(date), tickers: tickers.iter().map(|s| s.to_string()).collect() }
+    }
+
+    fn seeded() -> Cache {
+        let c = Cache::open(":memory:").unwrap();
+        c.save_sp500_membership(&[
+            snap("2020-01-01", &["AAPL", "MSFT", "GME"]),
+            snap("2020-12-21", &["AAPL", "MSFT", "TSLA"]), // TSLA replaces GME
+            snap("2021-06-01", &["AAPL", "MSFT", "TSLA", "COIN"]),
+        ])
+        .unwrap();
+        c
+    }
+
+    #[test]
+    fn as_of_picks_the_latest_change_on_or_before_the_date() {
+        let c = seeded();
+        assert_eq!(c.sp500_membership_as_of(d("2020-06-15")).unwrap(), vec!["AAPL", "MSFT", "GME"]);
+        assert_eq!(c.sp500_membership_as_of(d("2020-12-21")).unwrap(), vec!["AAPL", "MSFT", "TSLA"]);
+        assert_eq!(c.sp500_membership_as_of(d("2021-01-15")).unwrap(), vec!["AAPL", "MSFT", "TSLA"]);
+        assert_eq!(c.sp500_membership_as_of(d("2021-06-01")).unwrap(), vec!["AAPL", "MSFT", "TSLA", "COIN"]);
+    }
+
+    #[test]
+    fn as_of_before_the_dataset_falls_back_to_the_earliest_row() {
+        let c = seeded();
+        assert_eq!(c.sp500_membership_as_of(d("1999-01-01")).unwrap(), vec!["AAPL", "MSFT", "GME"]);
+    }
+
+    #[test]
+    fn union_covers_every_member_across_the_window_including_the_row_just_before_it() {
+        let c = seeded();
+        // Window entirely within the GME era: union == that one snapshot.
+        let u = c.sp500_membership_union(d("2020-02-01"), d("2020-03-01")).unwrap();
+        let mut v: Vec<_> = u.into_iter().collect();
+        v.sort();
+        assert_eq!(v, vec!["AAPL", "GME", "MSFT"]);
+
+        // Window straddling the GME->TSLA swap: union has both.
+        let u = c.sp500_membership_union(d("2020-12-01"), d("2020-12-31")).unwrap();
+        assert!(u.contains("GME") && u.contains("TSLA"), "{u:?}");
+        assert!(!u.contains("COIN"));
+    }
+
+    #[test]
+    fn has_cache_respects_the_max_age_window() {
+        let c = seeded();
+        assert!(c.has_sp500_membership_cache(30));
+        assert!(!c.has_sp500_membership_cache(-1), "a negative window must never be considered fresh");
+    }
+
+    #[test]
+    fn re_saving_overwrites_rather_than_duplicating() {
+        let c = seeded();
+        c.save_sp500_membership(&[snap("2020-01-01", &["ONLY"])]).unwrap();
+        assert_eq!(c.sp500_membership_as_of(d("2020-06-01")).unwrap(), vec!["ONLY"]);
     }
 }

@@ -98,8 +98,15 @@ Don't read anything into fewer than ~30 matured entries.
 
 Stated plainly, because they bias results:
 
-* **Survivorship bias.** The universe is today's ticker list; delisted and
-  bankrupt names are absent, which flatters every historical result.
+* **Survivorship bias, partially fixed.** `--backfill-days --us` now uses each
+  day's *actual* point-in-time S&P 500 membership (`universe::historical_membership`,
+  a community-maintained dataset covering 1996-present, verified against a
+  known fact: TSLA is absent before 2020-12-21 and present after). The live
+  daily job and the NSE side still use today's list (correct for the live job;
+  a genuine gap for NSE). Residual limitation: some long-delisted names that
+  *were* index members no longer have any Yahoo price data at all, so they are
+  still silently skipped rather than truly reconstructed — full survivorship
+  correction needs a paid point-in-time price vendor.
 * **No delisting handling.** A position whose price series ends is marked at its
   last price indefinitely.
 * **Sentiment and insider history is thin** for the past (see §1); backtests of

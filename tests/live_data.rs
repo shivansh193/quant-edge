@@ -100,3 +100,29 @@ async fn news_is_disabled_rather_than_fabricated() {
     let items = gdelt.fetch_news_sentiment("AAPL", today, 30).await.unwrap();
     assert!(items.is_empty());
 }
+
+#[tokio::test]
+#[ignore = "hits the live GitHub raw-content API"]
+async fn point_in_time_sp500_membership_matches_known_history() {
+    use quant_edge::universe::HistoricalMembership;
+
+    let cache = Cache::open(":memory:").unwrap();
+    let hist = HistoricalMembership::new(cache);
+
+    // TSLA joined the S&P 500 on 2020-12-21.
+    let before = hist.members_as_of(d("2020-12-01")).await.unwrap();
+    let after = hist.members_as_of(d("2021-01-01")).await.unwrap();
+    println!("members before: {} after: {}", before.len(), after.len());
+    assert!(!before.contains(&"TSLA".to_string()), "TSLA should not be a member yet");
+    assert!(after.contains(&"TSLA".to_string()), "TSLA should be a member by 2021-01-01");
+    assert!(before.len() > 400 && after.len() > 400, "sanity: roughly 500 members");
+
+    // A window straddling the swap must include both the removed and added name.
+    let union = hist.union_over(d("2020-12-01"), d("2020-12-31")).await.unwrap();
+    assert!(union.contains("TSLA"));
+
+    // A date long before the dataset starts falls back to the earliest row
+    // rather than erroring or returning nothing.
+    let ancient = hist.members_as_of(d("1990-01-01")).await.unwrap();
+    assert!(!ancient.is_empty());
+}

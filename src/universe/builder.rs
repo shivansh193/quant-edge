@@ -76,6 +76,26 @@ impl Universe {
         self.by_industry.values().filter(|v| !v.is_empty()).count()
     }
 
+    /// A cheap, in-memory view restricted to `allowed` tickers, keeping the
+    /// same config and industry grouping. No network calls. Used to turn one
+    /// resolved "superset" universe into a day-specific point-in-time
+    /// universe for each backfilled date without re-resolving anything.
+    pub fn filtered(&self, allowed: &std::collections::HashSet<String>) -> Universe {
+        let by_industry = self
+            .by_industry
+            .iter()
+            .filter_map(|(&code, slots)| {
+                let kept: Vec<CompanySlot> = slots
+                    .iter()
+                    .filter(|s| allowed.contains(&s.ticker))
+                    .cloned()
+                    .collect();
+                (!kept.is_empty()).then_some((code, kept))
+            })
+            .collect();
+        Universe { by_industry, config: self.config.clone() }
+    }
+
     /// Total company count across all industries.
     pub fn total_companies(&self) -> usize {
         self.by_industry.values().map(|v| v.len()).sum()
