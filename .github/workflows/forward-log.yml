@@ -1,0 +1,78 @@
+name: Daily forward-test log
+
+# Runs the real daily US morning job on a GitHub-hosted runner, so the forward
+# log advances even if your laptop is off. This is the recommended runner —
+# the local Windows Task Scheduler job (scripts/setup_forward_task.ps1) is
+# still fine to keep registered too: both pull before running and the
+# forward-test log is append-only, so whichever runs first for a given date
+# wins and the other becomes a safe no-op (see scripts/daily_forward.ps1).
+#
+# 12:30 UTC = 08:30 ET (EDT, summer) / 07:30 ET (EST, winter) - before the
+# 09:30 ET open either side of DST, so signals always use the prior close
+# with next-open entry, matching the backtester's convention.
+on:
+  schedule:
+    - cron: "30 12 * * 1-5"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  # SEC asks API clients to identify themselves. Set a SEC_USER_AGENT repo
+  # secret ("Your Name you@example.com") to use your own; falls back to the
+  # built-in placeholder otherwise.
+  SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
+
+jobs:
+  forward-log:
+    runs-on: ubuntu-latest
+    # 40 min budget (matches the local task): a cold cache.db (first-ever run,
+    # or after the weekly cache eviction) needs real SEC/EDGAR downloads for
+    # ~500 tickers; a warm one takes a few minutes.
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # Persist the SQLite cache (prices, SEC facts, insider trades, ...)
+      # across runs so most days are fast and don't re-download everything.
+      # Cache entries are immutable per key, so each run's key is unique and
+      # falls back to the most recent previous one via restore-keys.
+      - name: Restore data cache
+        uses: actions/cache@v4
+        with:
+          path: cache.db
+          key: quant-edge-cache-db-${{ github.run_id }}
+          restore-keys: |
+            quant-edge-cache-db-
+
+      - name: Build
+        run: cargo build --release --bin quant-edge --locked
+
+      # forward_log/ is tracked in git; pull first so a run that starts after
+      # someone else already recorded today's entry sees that immediately
+      # (record() is append-only and will just skip cleanly, not fail).
+      - name: Pull latest
+        run: git pull --ff-only origin main
+
+      - name: Run the US morning job
+        run: ./target/release/quant-edge --morning --us
+
+      - name: Verify the forward-test log's hash chain
+        run: ./target/release/quant-edge --forward-verify
+
+      - name: Commit and push if a new entry was written
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add forward_log
+          if git diff --cached --quiet -- forward_log; then
+            echo "Nothing new to commit (today's entry already existed, or the market was closed)."
+          else
+            git commit -m "forward log $(date -u +%F) [automated]"
+            git push origin main
+          fi
