@@ -34,6 +34,8 @@ use crate::data::DataSource;
 use crate::metrics::ic::{self, IcSummary};
 use crate::signals::SignalScore;
 
+pub mod diff;
+
 pub const SCHEMA_VERSION: u32 = 1;
 pub const DEFAULT_DIR: &str = "forward_log";
 

@@ -278,6 +278,11 @@ struct Cli {
     /// currently likes, doesn't, and which of its picks you don't hold.
     #[arg(long)]
     reconcile: bool,
+
+    /// Diff the two most recent forward-log entries: picks added/removed,
+    /// a regime flip, and the biggest composite-score movers.
+    #[arg(long)]
+    diff: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -381,6 +386,36 @@ async fn main() -> Result<()> {
         let engine = PaperTradingEngine::new(cache.clone());
         let portfolio = engine.status()?;
         print_portfolio_status(&portfolio, today);
+        return Ok(());
+    }
+
+    // ── Diff: read-only, no universe needed ───────────────────────────────────
+    if cli.diff {
+        let log_dir = cli.log_dir.clone().unwrap_or_else(|| quant_edge::forward_test::DEFAULT_DIR.to_string());
+        match quant_edge::forward_test::diff::diff_latest(std::path::Path::new(&log_dir))? {
+            None => println!("Need at least two forward-log entries in {log_dir} to diff."),
+            Some(dd) => {
+                println!();
+                println!("\x1b[1m\x1b[97mChanges: {} -> {}\x1b[0m", dd.prev_date, dd.curr_date);
+                if let Some((prev, curr)) = dd.regime_changed {
+                    let fmt = |on: bool| if on { "RISK-ON" } else { "RISK-OFF" };
+                    println!("  Regime flipped: {} -> {}", fmt(prev), fmt(curr));
+                }
+                if dd.prev_universe_size != dd.curr_universe_size {
+                    println!("  Universe size: {} -> {}", dd.prev_universe_size, dd.curr_universe_size);
+                }
+                println!();
+                println!("  Picks added:   {}", if dd.picks_added.is_empty() { "none".into() } else { dd.picks_added.join(", ") });
+                println!("  Picks removed: {}", if dd.picks_removed.is_empty() { "none".into() } else { dd.picks_removed.join(", ") });
+                if !dd.biggest_movers.is_empty() {
+                    println!();
+                    println!("  Biggest movers:");
+                    for m in dd.biggest_movers.iter().take(10) {
+                        println!("    {:<10} {:>6.1} -> {:>6.1}  ({:+.1})", m.ticker, m.prev_composite, m.curr_composite, m.delta);
+                    }
+                }
+            }
+        }
         return Ok(());
     }
 
