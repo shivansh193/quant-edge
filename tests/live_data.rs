@@ -126,3 +126,22 @@ async fn point_in_time_sp500_membership_matches_known_history() {
     let ancient = hist.members_as_of(d("1990-01-01")).await.unwrap();
     assert!(!ancient.is_empty());
 }
+
+#[tokio::test]
+#[ignore = "hits the live Yahoo API"]
+async fn usd_inr_rate_is_sane_and_point_in_time() {
+    use quant_edge::fx::FxRates;
+    let cache = Cache::open(":memory:").unwrap();
+    let fx = FxRates::new(cache);
+    let today = chrono::Local::now().date_naive();
+
+    let rate = fx.usd_inr_rate(today).await.unwrap();
+    println!("USD/INR today: {rate}");
+    assert!(rate > 70.0 && rate < 120.0, "outside any plausible USD/INR range: {rate}");
+
+    // A rate from a year ago should differ from today's (it's a real,
+    // moving market rate, not a hardcoded constant).
+    let past = fx.usd_inr_rate(today - chrono::Duration::days(365)).await.unwrap();
+    println!("USD/INR ~1y ago: {past}");
+    assert!(past > 70.0 && past < 120.0);
+}

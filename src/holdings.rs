@@ -179,6 +179,98 @@ pub fn portfolio_xirr(
     Ok(xirr(&flows))
 }
 
+/// True if every trade and current holding is already in one currency —
+/// the common case, and the only one `portfolio_xirr` above is valid for.
+/// A mixed NSE (₹) + NYSE ($) book needs `portfolio_xirr_multi_currency`
+/// instead: summing raw INR and USD amounts together is not a real number.
+pub fn is_single_currency(trades: &[Trade]) -> bool {
+    let mut currencies = trades.iter().map(|t| crate::fx::Currency::of_ticker(&t.ticker));
+    let Some(first) = currencies.next() else { return true };
+    currencies.all(|c| c == first)
+}
+
+/// Pure core of the multi-currency XIRR: build reporting-currency cash flows
+/// given a rate LOOKUP rather than fetching rates itself, so this can be
+/// tested without a network call. `inr_per_usd_at(date)` should return the
+/// rate effective on `date`; `None` for a date it can't answer is an error
+/// (silently guessing a currency conversion would be worse than failing).
+pub fn build_converted_flows(
+    trades: &[Trade],
+    current_prices: &HashMap<String, f64>,
+    as_of: NaiveDate,
+    reporting: crate::fx::Currency,
+    inr_per_usd_at: impl Fn(NaiveDate) -> Option<f64>,
+) -> Result<Vec<CashFlow>> {
+    use crate::fx::{convert_at_rate, Currency};
+
+    let rate_for = |date: NaiveDate, from: Currency| -> Result<f64> {
+        if from == reporting {
+            Ok(1.0)
+        } else {
+            inr_per_usd_at(date).with_context(|| format!("no USD/INR rate available for {date}"))
+        }
+    };
+
+    let mut flows = Vec::with_capacity(trades.len() + 1);
+    for t in trades {
+        let from = Currency::of_ticker(&t.ticker);
+        let rate = rate_for(t.date, from)?;
+        flows.push(CashFlow::new(t.date, convert_at_rate(t.cash_flow(), from, reporting, rate)));
+    }
+
+    let holdings = compute_holdings(trades);
+    let mut tickers: Vec<&String> = holdings.keys().collect();
+    tickers.sort(); // deterministic iteration order
+    let mut remaining_value = 0.0;
+    for ticker in tickers {
+        let h = &holdings[ticker];
+        if h.quantity <= 0.0 {
+            continue;
+        }
+        let px = current_prices.get(ticker).with_context(|| format!("no current price given for held ticker {ticker}"))?;
+        let from = Currency::of_ticker(ticker);
+        let rate = rate_for(as_of, from)?;
+        remaining_value += convert_at_rate(h.quantity * px, from, reporting, rate);
+    }
+    if remaining_value > 0.0 {
+        flows.push(CashFlow::new(as_of, remaining_value));
+    }
+    Ok(flows)
+}
+
+/// XIRR of a MIXED-currency book, converting every flow to `reporting`
+/// using the point-in-time USD/INR rate on that flow's own date (not
+/// today's rate applied uniformly, which would misstate old trades exactly
+/// the way an un-dated fundamental snapshot would).
+pub async fn portfolio_xirr_multi_currency(
+    trades: &[Trade],
+    current_prices: &HashMap<String, f64>,
+    as_of: NaiveDate,
+    reporting: crate::fx::Currency,
+    fx: &crate::fx::FxRates,
+) -> Result<Option<f64>> {
+    use crate::fx::Currency;
+
+    let mut needed_dates: std::collections::BTreeSet<NaiveDate> = std::collections::BTreeSet::new();
+    for t in trades {
+        if Currency::of_ticker(&t.ticker) != reporting {
+            needed_dates.insert(t.date);
+        }
+    }
+    let holdings = compute_holdings(trades);
+    if holdings.keys().any(|t| Currency::of_ticker(t) != reporting && holdings[t].quantity > 0.0) {
+        needed_dates.insert(as_of);
+    }
+
+    let mut rates: HashMap<NaiveDate, f64> = HashMap::new();
+    for date in needed_dates {
+        rates.insert(date, fx.usd_inr_rate(date).await?);
+    }
+
+    let flows = build_converted_flows(trades, current_prices, as_of, reporting, |d| rates.get(&d).copied())?;
+    Ok(xirr(&flows))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -307,5 +399,73 @@ mod tests {
         ];
         let r = portfolio_xirr(&trades, &HashMap::new(), d("2024-06-01")).unwrap().unwrap();
         assert!((r - 0.20).abs() < 1e-3, "{r}");
+    }
+
+    // ── multi-currency ────────────────────────────────────────────────────────
+
+    #[test]
+    fn is_single_currency_detects_mixed_books() {
+        let usd_only = vec![
+            Trade { date: d("2024-01-01"), ticker: "AAPL".into(), side: Side::Buy, quantity: 1.0, price: 100.0, fees: 0.0 },
+            Trade { date: d("2024-01-02"), ticker: "MSFT".into(), side: Side::Buy, quantity: 1.0, price: 100.0, fees: 0.0 },
+        ];
+        assert!(is_single_currency(&usd_only));
+        let mixed = vec![
+            Trade { date: d("2024-01-01"), ticker: "AAPL".into(), side: Side::Buy, quantity: 1.0, price: 100.0, fees: 0.0 },
+            Trade { date: d("2024-01-02"), ticker: "RELIANCE.NS".into(), side: Side::Buy, quantity: 1.0, price: 2500.0, fees: 0.0 },
+        ];
+        assert!(!is_single_currency(&mixed));
+        assert!(is_single_currency(&[]));
+    }
+
+    #[test]
+    fn mixed_currency_flows_are_converted_before_being_valid_cash_flows() {
+        use crate::fx::Currency;
+        // Buy $100 of AAPL and ₹9000 of RELIANCE.NS on the same day, at 90 INR/USD.
+        let trades = vec![
+            Trade { date: d("2024-01-01"), ticker: "AAPL".into(), side: Side::Buy, quantity: 1.0, price: 100.0, fees: 0.0 },
+            Trade { date: d("2024-01-01"), ticker: "RELIANCE.NS".into(), side: Side::Buy, quantity: 1.0, price: 9000.0, fees: 0.0 },
+        ];
+        let mut prices = HashMap::new();
+        prices.insert("AAPL".to_string(), 110.0);
+        prices.insert("RELIANCE.NS".to_string(), 9900.0); // +10% in INR too
+
+        let flows = build_converted_flows(&trades, &prices, d("2024-06-01"), Currency::Usd, |_| Some(90.0)).unwrap();
+        // Two buys: -100 (AAPL, already USD) and -100 (9000 INR / 90 = 100 USD).
+        assert!((flows[0].amount + 100.0).abs() < 1e-9);
+        assert!((flows[1].amount + 100.0).abs() < 1e-9, "RELIANCE buy should convert to -$100, got {}", flows[1].amount);
+        // Final flow: 110 (AAPL) + 9900/90=110 (RELIANCE) = 220, in USD.
+        let final_flow = flows.last().unwrap();
+        assert!((final_flow.amount - 220.0).abs() < 1e-6, "{}", final_flow.amount);
+    }
+
+    #[test]
+    fn a_single_currency_book_needs_no_rate_lookup_at_all() {
+        use crate::fx::Currency;
+        let trades = vec![Trade { date: d("2024-01-01"), ticker: "AAPL".into(), side: Side::Buy, quantity: 1.0, price: 100.0, fees: 0.0 }];
+        let mut prices = HashMap::new();
+        prices.insert("AAPL".to_string(), 110.0);
+        // The rate closure panics if called - a same-currency book must never call it.
+        let flows = build_converted_flows(&trades, &prices, d("2024-06-01"), Currency::Usd, |_| panic!("should not need a rate")).unwrap();
+        assert_eq!(flows.len(), 2);
+    }
+
+    #[test]
+    fn a_missing_rate_for_a_needed_date_is_an_error_not_a_silent_guess() {
+        use crate::fx::Currency;
+        let trades = vec![Trade { date: d("2024-01-01"), ticker: "RELIANCE.NS".into(), side: Side::Buy, quantity: 1.0, price: 9000.0, fees: 0.0 }];
+        let err = build_converted_flows(&trades, &HashMap::new(), d("2024-06-01"), Currency::Usd, |_| None).unwrap_err();
+        assert!(format!("{err:#}").contains("2024-01-01"), "{err:#}");
+    }
+
+    #[test]
+    fn reporting_in_the_minority_currency_still_works() {
+        use crate::fx::Currency;
+        let trades = vec![Trade { date: d("2024-01-01"), ticker: "AAPL".into(), side: Side::Buy, quantity: 1.0, price: 100.0, fees: 0.0 }];
+        let mut prices = HashMap::new();
+        prices.insert("AAPL".to_string(), 100.0); // flat, so the final flow is just for the round-trip check below
+        // Reporting in INR: the USD buy of $100 becomes -9000 INR at 90/USD.
+        let flows = build_converted_flows(&trades, &prices, d("2024-06-01"), Currency::Inr, |_| Some(90.0)).unwrap();
+        assert!((flows[0].amount + 9000.0).abs() < 1e-6, "{}", flows[0].amount);
     }
 }

@@ -431,7 +431,8 @@ async fn main() -> Result<()> {
 
         println!();
         println!("\x1b[1m\x1b[97mHoldings ({} trade(s) imported)\x1b[0m", trades.len());
-        println!("{:<10} {:>12} {:>12} {:>12} {:>14} {:>14}", "Ticker", "Qty", "Avg Cost", "Last", "Unrealised", "Realised");
+        println!("(all money columns are in the ticker's OWN currency: $ for US tickers, ₹ for .NS tickers)");
+        println!("{:<10} {:>4} {:>12} {:>12} {:>12} {:>14} {:>14}", "Ticker", "Ccy", "Qty", "Avg Cost", "Last", "Unrealised", "Realised");
 
         let yahoo = YahooFinance::new(cache.clone());
         let mut current_prices = std::collections::HashMap::new();
@@ -452,16 +453,29 @@ async fn main() -> Result<()> {
                 None
             };
             let unrealized = last.map(|px| h.quantity * (px - h.avg_cost));
+            let ccy = match quant_edge::fx::Currency::of_ticker(ticker) {
+                quant_edge::fx::Currency::Usd => "$",
+                quant_edge::fx::Currency::Inr => "₹",
+            };
             println!(
-                "{:<10} {:>12.2} {:>12.2} {:>12} {:>14} {:>14.2}",
-                ticker, h.quantity, h.avg_cost,
+                "{:<10} {:>4} {:>12.2} {:>12.2} {:>12} {:>14} {:>14.2}",
+                ticker, ccy, h.quantity, h.avg_cost,
                 last.map(|p| format!("{p:.2}")).unwrap_or_else(|| "n/a".to_string()),
                 unrealized.map(|u| format!("{u:+.2}")).unwrap_or_else(|| "n/a".to_string()),
                 h.realized_pnl,
             );
         }
 
-        match portfolio_xirr(&trades, &current_prices, today) {
+        let xirr_result = if quant_edge::holdings::is_single_currency(&trades) {
+            portfolio_xirr(&trades, &current_prices, today)
+        } else {
+            let fx = quant_edge::fx::FxRates::new(cache.clone());
+            println!("\n(mixed-currency book detected — converting to USD at each flow's own date's USD/INR rate)");
+            quant_edge::holdings::portfolio_xirr_multi_currency(
+                &trades, &current_prices, today, quant_edge::fx::Currency::Usd, &fx,
+            ).await
+        };
+        match xirr_result {
             Ok(Some(rate)) => println!("\nPortfolio XIRR: {:+.2}%", rate * 100.0),
             Ok(None) => println!("\nPortfolio XIRR: not computable (need both an outflow and an inflow)"),
             Err(e) => println!("\nPortfolio XIRR: unavailable - {e:#}"),
