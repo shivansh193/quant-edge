@@ -412,6 +412,116 @@ pub fn evaluate_entry(
     })
 }
 
+// ── Mark-to-market status (open calls, before the horizon matures) ─────────────
+
+/// Return from the open of the first bar after `after` to the CLOSE OF THE
+/// LATEST AVAILABLE BAR, whatever that is — unlike `hold_return`, this never
+/// requires a fixed horizon to have elapsed. `None` if the pick hasn't even
+/// entered yet (no bar after `after`) or nothing has traded since entry.
+fn mark_to_market(series: &PriceSeries, after: NaiveDate) -> Option<(NaiveDate, NaiveDate, f64, usize)> {
+    let bars = series.bars();
+    let i = bars.partition_point(|b| b.date <= after);
+    let entry = bars.get(i)?;
+    let latest = bars.last()?;
+    if latest.date <= entry.date {
+        return None;
+    }
+    let px = entry.adj_open();
+    (px.is_finite() && px > 0.0).then(|| (entry.date, latest.date, latest.adj_close / px - 1.0, bars.len() - i))
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PickStatus {
+    pub ticker: String,
+    pub entry_date: NaiveDate,
+    pub as_of: NaiveDate,
+    pub return_so_far: f64,
+    pub trading_days_held: usize,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct EntryStatus {
+    pub logged_on: NaiveDate,
+    pub in_cash: bool,
+    pub picks: Vec<PickStatus>,
+    pub basket_return_so_far: Option<f64>,
+    pub benchmark_return_so_far: Option<f64>,
+    /// True once every pick has at least `horizon` trading days behind it —
+    /// `--forward-eval` will score this entry too, so it stops appearing here.
+    pub matured: bool,
+}
+
+/// Mark-to-market view of one logged entry, using whatever price history
+/// exists today — no need to wait for the full `--horizon` to elapse. This is
+/// how you check on OPEN calls; `evaluate_entry` is the honest final grade
+/// once they've fully played out.
+pub fn status_entry(entry: &ForwardEntry, prices: &PriceStore, benchmark: Option<&PriceSeries>, horizon: usize) -> EntryStatus {
+    let bench_mtm = benchmark.and_then(|b| mark_to_market(b, entry.data_through));
+
+    if entry.picks.is_empty() {
+        return EntryStatus {
+            logged_on: entry.as_of,
+            in_cash: true,
+            picks: Vec::new(),
+            basket_return_so_far: Some(0.0),
+            benchmark_return_so_far: bench_mtm.map(|b| b.2),
+            matured: true, // cash has nothing left to wait on
+        };
+    }
+
+    let mut picks = Vec::new();
+    for p in &entry.picks {
+        let Some(series) = prices.get(&p.ticker) else { continue };
+        if let Some((entry_date, as_of, ret, days_held)) = mark_to_market(series, entry.data_through) {
+            picks.push(PickStatus { ticker: p.ticker.clone(), entry_date, as_of, return_so_far: ret, trading_days_held: days_held });
+        }
+    }
+    let matured = !picks.is_empty() && picks.iter().all(|p| p.trading_days_held >= horizon);
+    let basket = (!picks.is_empty())
+        .then(|| picks.iter().map(|p| p.return_so_far).sum::<f64>() / picks.len() as f64);
+    EntryStatus {
+        logged_on: entry.as_of,
+        in_cash: false,
+        picks,
+        basket_return_so_far: basket,
+        benchmark_return_so_far: bench_mtm.map(|b| b.2),
+        matured,
+    }
+}
+
+/// Mark-to-market status of every logged entry that has NOT yet fully matured
+/// at `horizon` (matured ones are `--forward-eval`'s job). Loads the same
+/// price history `evaluate` does.
+pub async fn status(dir: &Path, cache: &Cache, horizon: usize) -> Result<Vec<EntryStatus>> {
+    let entries = read_all(dir)?;
+    if entries.is_empty() {
+        return Err(anyhow!("no forward-test entries in {}", dir.display()));
+    }
+    let today = chrono::Local::now().date_naive();
+    let earliest = entries.iter().map(|e| e.data_through).min().unwrap_or(today);
+    let yahoo = YahooFinance::new(cache.clone());
+
+    let mut tickers: Vec<String> = entries.iter().flat_map(|e| e.picks.iter().map(|p| p.ticker.clone())).collect();
+    tickers.sort();
+    tickers.dedup();
+
+    let mut prices = PriceStore::new();
+    for t in &tickers {
+        let bars = yahoo.price_history(t, earliest - Duration::days(5), today).await.unwrap_or_default();
+        prices.insert(t.clone(), PriceSeries::new(bars));
+    }
+
+    let nse = tickers.iter().filter(|t| t.ends_with(".NS")).count();
+    let bench_ticker = if nse * 2 > tickers.len() { "^NSEI" } else { "^GSPC" };
+    let bench = yahoo.price_history(bench_ticker, earliest - Duration::days(5), today).await.ok().map(PriceSeries::new);
+
+    Ok(entries
+        .iter()
+        .map(|e| status_entry(e, &prices, bench.as_ref(), horizon))
+        .filter(|s| !s.matured)
+        .collect())
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct EvalSummary {
     pub n: usize,
@@ -810,5 +920,56 @@ mod tests {
         // Too few names -> no IC rather than a noisy one.
         e.ranking.truncate(10);
         assert!(evaluate_entry(&e, &store, None, 2).unwrap().rank_ic.is_none());
+    }
+
+    // ── mark-to-market status ────────────────────────────────────────────────
+
+    #[test]
+    fn status_reports_a_running_return_long_before_the_horizon_matures() {
+        // Only 2 bars past entry exist; a 21-day-horizon evaluate_entry would
+        // return None (not matured). status_entry must still report something.
+        let a = series_from(&[("2024-03-04", 100.0, 100.0), ("2024-03-05", 100.0, 110.0), ("2024-03-06", 110.0, 120.0)]);
+        let mut store = PriceStore::new();
+        store.insert("AAA", a);
+        assert!(evaluate_entry(&entry_with(&["AAA"], "2024-03-04"), &store, None, 21).is_none());
+
+        let s = status_entry(&entry_with(&["AAA"], "2024-03-04"), &store, None, 21);
+        assert!(!s.matured);
+        assert_eq!(s.picks.len(), 1);
+        assert_eq!(s.picks[0].as_of, d("2024-03-06"));
+        assert_eq!(s.picks[0].trading_days_held, 2);
+        assert!((s.picks[0].return_so_far - 0.20).abs() < 1e-9);
+        assert!((s.basket_return_so_far.unwrap() - 0.20).abs() < 1e-9);
+    }
+
+    #[test]
+    fn status_marks_an_entry_matured_once_every_pick_has_enough_history() {
+        let a = series_from(&[("2024-03-04", 100.0, 100.0), ("2024-03-05", 100.0, 110.0), ("2024-03-06", 110.0, 120.0)]);
+        let mut store = PriceStore::new();
+        store.insert("AAA", a);
+        let s = status_entry(&entry_with(&["AAA"], "2024-03-04"), &store, None, 2);
+        assert!(s.matured, "2 trading days held, horizon 2: fully matured");
+    }
+
+    #[test]
+    fn status_of_a_cash_entry_is_always_matured_with_zero_return() {
+        let bench = series_from(&[("2024-03-04", 100.0, 100.0), ("2024-03-05", 100.0, 104.0), ("2024-03-06", 104.0, 108.0)]);
+        let s = status_entry(&entry_with(&[], "2024-03-04"), &PriceStore::new(), Some(&bench), 21);
+        assert!(s.in_cash);
+        assert!(s.matured);
+        assert_eq!(s.basket_return_so_far, Some(0.0));
+        assert!((s.benchmark_return_so_far.unwrap() - 0.08).abs() < 1e-9);
+    }
+
+    #[test]
+    fn status_skips_a_pick_that_has_not_entered_yet() {
+        // No bar after data_through at all: the pick hasn't opened a position.
+        let a = series_from(&[("2024-03-04", 100.0, 100.0)]);
+        let mut store = PriceStore::new();
+        store.insert("AAA", a);
+        let s = status_entry(&entry_with(&["AAA"], "2024-03-04"), &store, None, 21);
+        assert!(s.picks.is_empty());
+        assert!(s.basket_return_so_far.is_none());
+        assert!(!s.matured);
     }
 }

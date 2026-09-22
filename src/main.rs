@@ -207,7 +207,14 @@ struct Cli {
     #[arg(long)]
     forward_eval: bool,
 
-    /// Holding horizon in trading days for --forward-eval.
+    /// Mark-to-market status of every OPEN call (not yet at the full horizon):
+    /// per-ticker return so far, using today's prices. --forward-eval only
+    /// grades entries once they've fully matured; this is how you check on
+    /// them in the meantime.
+    #[arg(long)]
+    forward_status: bool,
+
+    /// Holding horizon in trading days for --forward-eval / --forward-status.
     #[arg(long, default_value_t = 21)]
     horizon: usize,
 
@@ -591,7 +598,7 @@ async fn main() -> Result<()> {
     }
 
     // ── Forward-test log: read-only, no universe needed ──────────────────────
-    if cli.forward_verify || cli.forward_eval {
+    if cli.forward_verify || cli.forward_eval || cli.forward_status {
         let dir = cli.log_dir.clone().unwrap_or_else(|| {
             std::env::var("FORWARD_LOG_DIR")
                 .unwrap_or_else(|_| quant_edge::forward_test::DEFAULT_DIR.to_string())
@@ -639,6 +646,32 @@ async fn main() -> Result<()> {
                         o.benchmark_return.map_or("   n/a".to_string(), |b| format!("{:>+6.2}%", b * 100.0)),
                         o.excess.map_or("   n/a".to_string(), |x| format!("{:>+6.2}%", x * 100.0)),
                     );
+                }
+            }
+        }
+
+        if cli.forward_status {
+            let statuses = quant_edge::forward_test::status(dir, &cache, cli.horizon).await?;
+            println!();
+            if statuses.is_empty() {
+                println!("No open calls: every logged entry has either matured (see --forward-eval) or none exist yet.");
+            } else {
+                println!("Open calls (mark-to-market, not yet at the {}-day horizon)", cli.horizon);
+                for s in &statuses {
+                    if s.in_cash {
+                        println!("  {}  CASH", s.logged_on);
+                        continue;
+                    }
+                    let basket = s.basket_return_so_far.map_or("   n/a".to_string(), |b| format!("{:>+6.2}%", b * 100.0));
+                    let bench = s.benchmark_return_so_far.map_or("   n/a".to_string(), |b| format!("{:>+6.2}%", b * 100.0));
+                    println!("  {}  {:>2} picks  basket {basket}  index {bench}", s.logged_on, s.picks.len());
+                    for p in &s.picks {
+                        println!(
+                            "      {:<8} {:>+6.2}%   {} trading day{} held (as of {})",
+                            p.ticker, p.return_so_far * 100.0, p.trading_days_held,
+                            if p.trading_days_held == 1 { "" } else { "s" }, p.as_of,
+                        );
+                    }
                 }
             }
         }

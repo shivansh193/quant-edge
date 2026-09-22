@@ -87,12 +87,21 @@ regime, code version and a universe hash. Entries are append-only and hash-chain
 ```bash
 quant-edge --forward-verify          # check the chain
 quant-edge --forward-eval            # score matured entries vs. the benchmark
+quant-edge --forward-status          # mark-to-market on calls still OPEN
 scripts/commit_forward_log.sh        # commit it, so git timestamps it externally
 ```
 
 A hash chain cannot detect deleting the *most recent* entries; committing to git
 covers that. Evaluation uses the same next-open convention as the backtester.
 Don't read anything into fewer than ~30 matured entries.
+
+`--forward-eval` only grades an entry once every pick has a full `--horizon`
+trading days of price history (21 by default — i.e. it can take a month before
+the first entry is scored at all). `--forward-status` is the interim view: for
+every entry that hasn't matured yet, it prices each pick from its logged entry
+open to the latest available close and reports the running return per ticker,
+plus a basket vs. benchmark line. It never affects the hash chain or the grade
+itself — it's read-only, same source data `--forward-eval` uses.
 
 ## 5. Known limitations
 
