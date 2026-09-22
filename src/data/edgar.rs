@@ -20,6 +20,39 @@ fn shared_cik_map() -> Arc<Mutex<HashMap<String, u64>>> {
     MAP.get_or_init(|| Arc::new(Mutex::new(HashMap::new()))).clone()
 }
 
+/// GET `url` as JSON, retrying up to `attempts` times on any failure (request
+/// error, non-2xx status, or an unparsable body) with a short linear backoff.
+/// Always waits `EDGAR_DELAY_MS` before each attempt, so this also carries the
+/// rate-limit delay rather than needing a separate sleep at each call site.
+async fn fetch_json_with_retries<T: serde::de::DeserializeOwned>(
+    client: &Client,
+    url: &str,
+    attempts: u32,
+) -> Result<T> {
+    let mut last_err = None;
+    for attempt in 0..attempts.max(1) {
+        tokio::time::sleep(std::time::Duration::from_millis(
+            EDGAR_DELAY_MS + attempt as u64 * 500,
+        ))
+        .await;
+        let result: Result<T> = async {
+            let resp = client.get(url).send().await.context("request failed")?;
+            let resp = resp.error_for_status().context("non-2xx status")?;
+            resp.json::<T>().await.context("body was not valid JSON")
+        }
+        .await;
+        match result {
+            Ok(v) => return Ok(v),
+            Err(e) => {
+                warn!(url, attempt = attempt + 1, attempts, "fetch failed, {}: {e:#}",
+                      if attempt + 1 < attempts { "retrying" } else { "giving up" });
+                last_err = Some(e);
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| anyhow!("fetch_json_with_retries called with 0 attempts")))
+}
+
 /// Fetches Form 4 insider-trade filings from SEC EDGAR.
 /// All results are cached in SQLite with a 48-hour TTL.
 pub struct EdgarFetcher {
@@ -156,17 +189,22 @@ impl EdgarFetcher {
             }
         }
 
-        // Fetch the full ticker→CIK map from EDGAR (once per process)
-        tokio::time::sleep(std::time::Duration::from_millis(EDGAR_DELAY_MS)).await;
-        let raw: serde_json::Value = self
-            .client
-            .get("https://www.sec.gov/files/company_tickers.json")
-            .send()
-            .await
-            .context("EDGAR company_tickers fetch failed")?
-            .json()
-            .await
-            .context("EDGAR company_tickers parse failed")?;
+        // Fetch the full ticker→CIK map from EDGAR (once per process). This one
+        // fetch gates every subsequent ticker's CIK lookup for the rest of the
+        // run (the empty-map check above means a single transient failure here
+        // makes EVERY ticker retry-and-fail all over again) — worth retrying a
+        // couple of times before giving up, unlike a routine per-ticker fetch.
+        // Seen in practice: a clean re-run of the identical request a minute
+        // later succeeded, consistent with a transient blip rather than a
+        // real block (SEC does not otherwise rate-limit this endpoint at our
+        // request rate).
+        let raw: serde_json::Value = fetch_json_with_retries(
+            &self.client,
+            "https://www.sec.gov/files/company_tickers.json",
+            3,
+        )
+        .await
+        .context("EDGAR company_tickers fetch failed after retries")?;
 
         let mut guard = self.cik_map.lock().unwrap();
 
@@ -522,5 +560,77 @@ mod tests {
         // EDGAR's index points at the HTML-rendered view; the raw XML is one level up.
         assert_eq!(raw_form4_filename("xslF345X06/wk-form4_1789766132.xml"), "wk-form4_1789766132.xml");
         assert_eq!(raw_form4_filename("form4.xml"), "form4.xml");
+    }
+}
+
+#[cfg(test)]
+mod retry_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    /// A minimal local HTTP/1.1 server: serves `responses` in order (one per
+    /// connection), then keeps repeating the last one. Used to test retry
+    /// behaviour against a REAL flaky endpoint rather than mocked results.
+    async fn flaky_server(responses: Vec<&'static [u8]>) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut i = 0usize;
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else { break };
+                let body = responses[i.min(responses.len() - 1)];
+                i += 1;
+                let mut buf = [0u8; 1024];
+                let _ = sock.read(&mut buf).await; // drain the request
+                let _ = sock.write_all(body).await;
+                let _ = sock.shutdown().await;
+            }
+        });
+        format!("http://{addr}/x")
+    }
+
+    const OK_BODY: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 13\r\nConnection: close\r\n\r\n{\"cik\":12345}";
+    const GARBAGE_BODY: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+    const SERVER_ERROR: &[u8] = b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+
+    #[derive(serde::Deserialize, Debug)]
+    struct Resp {
+        cik: u64,
+    }
+
+    #[tokio::test]
+    async fn recovers_after_a_transient_failure() {
+        // Exactly what was observed live: the first attempt returns an empty
+        // body (an unparsable "expected value at line 1 column 1" in
+        // production), the second succeeds.
+        let url = flaky_server(vec![GARBAGE_BODY, OK_BODY]).await;
+        let client = Client::new();
+        let r: Resp = fetch_json_with_retries(&client, &url, 3).await.unwrap();
+        assert_eq!(r.cik, 12345);
+    }
+
+    #[tokio::test]
+    async fn recovers_from_a_5xx_status_not_just_a_bad_body() {
+        let url = flaky_server(vec![SERVER_ERROR, SERVER_ERROR, OK_BODY]).await;
+        let client = Client::new();
+        let r: Resp = fetch_json_with_retries(&client, &url, 3).await.unwrap();
+        assert_eq!(r.cik, 12345);
+    }
+
+    #[tokio::test]
+    async fn gives_up_after_the_configured_attempt_count() {
+        let url = flaky_server(vec![GARBAGE_BODY]).await;
+        let client = Client::new();
+        let err = fetch_json_with_retries::<Resp>(&client, &url, 2).await.unwrap_err();
+        assert!(format!("{err:#}").contains("body was not valid JSON"), "{err:#}");
+    }
+
+    #[tokio::test]
+    async fn a_single_immediate_success_needs_no_retry() {
+        let url = flaky_server(vec![OK_BODY]).await;
+        let client = Client::new();
+        let r: Resp = fetch_json_with_retries(&client, &url, 3).await.unwrap();
+        assert_eq!(r.cik, 12345);
     }
 }
