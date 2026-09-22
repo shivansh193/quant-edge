@@ -1,0 +1,18 @@
+name: diag-edgar
+on: { workflow_dispatch: {} }
+jobs:
+  diag:
+    runs-on: ubuntu-latest
+    steps:
+      - name: curl company_tickers.json
+        run: |
+          echo "-- with no special headers --"
+          curl -s -D - -o /tmp/out1.json "https://www.sec.gov/files/company_tickers.json" -A "portfolio-sim research@example.com" | head -20
+          echo "size: $(wc -c < /tmp/out1.json)"
+          head -c 300 /tmp/out1.json
+          echo
+          echo "-- with Accept-Encoding gzip, deflate (what the Rust client sends) --"
+          curl -s -D - -o /tmp/out2.bin -H "Accept-Encoding: gzip, deflate" "https://www.sec.gov/files/company_tickers.json" -A "portfolio-sim research@example.com" | head -20
+          echo "size: $(wc -c < /tmp/out2.bin)"
+          file /tmp/out2.bin
+          head -c 100 /tmp/out2.bin | xxd | head -3
