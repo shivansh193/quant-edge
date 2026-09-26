@@ -18,9 +18,11 @@ param([switch]$Push)
 $ErrorActionPreference = "Stop"
 Set-Location "$PSScriptRoot\.."
 
+# $ErrorActionPreference only catches PowerShell cmdlet errors, not a native
+# exe's exit code - git/cargo/quant-edge failures need an explicit check or
+# the script silently carries on with stale code/data.
 git pull --ff-only origin main
-
-$Exe = if (Test-Path ".\target\release\quant-edge.exe") { ".\target\release\quant-edge.exe" } else { ".\target\debug\quant-edge.exe" }
+if ($LASTEXITCODE -ne 0) { throw "git pull failed" }
 
 $Today = Get-Date -Format "yyyy-MM-dd"
 $Dir = if ($env:FORWARD_LOG_DIR) { $env:FORWARD_LOG_DIR } else { "forward_log" }
@@ -28,6 +30,15 @@ if (Test-Path "$Dir\$Today.json") {
     Write-Host "Today's forward-log entry already exists (recorded by another runner) - nothing to do."
     exit 0
 }
+
+# Always rebuild against whatever `git pull` just brought in. A binary from
+# an old commit doesn't just risk being "behind" - it can flat-out reject
+# CLI flags the current script passes (found 2026-09-26: a release build
+# from May silently failed every local run with "unexpected argument '--us'"
+# while GitHub Actions, which builds fresh every time, covered for it).
+cargo build --release
+if ($LASTEXITCODE -ne 0) { throw "release build failed" }
+$Exe = ".\target\release\quant-edge.exe"
 
 & $Exe --morning --us
 if ($LASTEXITCODE -ne 0) { throw "morning run failed" }
