@@ -1,0 +1,2080 @@
+{
+  "schema_version": 1,
+  "as_of": "2026-10-06",
+  "data_through": "2026-10-06",
+  "generated_at_utc": "2026-10-06T18:55:18.221846694+00:00",
+  "code_version": "6e16289",
+  "strategy": "morning: default composite",
+  "macro_on": true,
+  "vix": null,
+  "universe_size": 318,
+  "universe_hash": "5bd68c06079ca2e1e3b903fd5debc049fc3f34f49550298d5b3ed77644302568",
+  "picks": [
+    {
+      "ticker": "ILMN",
+      "rank": 1,
+      "composite": 78.1974481,
+      "momentum_raw": 0.884350237,
+      "fundamental_raw": 0.179467431,
+      "insider_raw": 0.0,
+      "sentiment_raw": 0.0,
+      "pairs_raw": 0.0,
+      "signals_available": 2,
+      "missing_signals": [
+        "insider",
+        "sentiment",
+        "pairs"
+      ]
+    },
+    {
+      "ticker": "APA",
+      "rank": 2,
+      "composite": 74.9705591,
+      "momentum_raw": 0.790512128,
+      "fundamental_raw": 0.150090045,
+      "insider_raw": 0.0,
+      "sentiment_raw": 0.0,
+      "pairs_raw": 0.0,
+      "signals_available": 2,
+      "missing_signals": [
+        "insider",
+        "sentiment",
+        "pairs"
+      ]
+    },
+    {
+      "ticker": "HWM",
+      "rank": 3,
+      "composite": 73.5047126,
+      "momentum_raw": 0.661084814,
+      "fundamental_raw": 0.240905579,
+      "insider_raw": 0.0,
+      "sentiment_raw": 0.0,
+      "pairs_raw": 0.0,
+      "signals_available": 2,
+      "missing_signals": [
+        "insider",
+        "sentiment",
+        "pairs"
+      ]
+    },
+    {
+      "ticker": "VLO",
+      "rank": 4,
+      "composite": 72.2966832,
+      "momentum_raw": 0.847683228,
+      "fundamental_raw": -0.0361658133,
+      "insider_raw": 0.0,
+      "sentiment_raw": 0.0,
+      "pairs_raw": 0.0,
+      "signals_available": 2,
+      "missing_signals": [
+        "insider",
+        "sentiment",
+        "pairs"
+      ]
+    },
+    {
+      "ticker": "CAT",
+      "rank": 5,
+      "composite": 71.8083202,
+      "momentum_raw": 0.741780994,
+      "fundamental_raw": 0.125413284,
+      "insider_raw": 0.0,
+      "sentiment_raw": 0.0,
+      "pairs_raw": 0.342859091,
+      "signals_available": 3,
+      "missing_signals": [
+        "insider",
+        "sentiment"
+      ]
+    },
+    {
+      "ticker": "STT",
+      "rank": 6,
+      "composite": 71.7105749,
+      "momentum_raw": 0.732309181,
+      "fundamental_raw": 0.0764942768,
+      "insider_raw": 0.0,
+      "sentiment_raw": 0.0,
+      "pairs_raw": 0.0,
+      "signals_available": 2,
+      "missing_signals": [
+        "insider",
+        "sentiment",
+        "pairs"
+      ]
+    },
+    {
+      "ticker": "FIX",
+      "rank": 7,
+      "composite": 71.3332998,
+      "momentum_raw": 0.756146005,
+      "fundamental_raw": 0.201264519,
+      "insider_raw": 0.0,
+      "sentiment_raw": 0.0,
+      "pairs_raw": 0.143375109,
+      "signals_available": 3,
+      "missing_signals": [
+        "insider",
+        "sentiment"
+      ]
+    },
+    {
+      "ticker": "MPC",
+      "rank": 8,
+      "composite": 70.4003749,
+      "momentum_raw": 0.847683228,
+      "fundamental_raw": -0.11960338,
+      "insider_raw": 0.0,
+      "sentiment_raw": 0.0,
+      "pairs_raw": 0.0,
+      "signals_available": 2,
+      "missing_signals": [
+        "insider",
+        "sentiment",
+        "pairs"
+      ]
+    },
+    {
+      "ticker": "LLY",
+      "rank": 9,
+      "composite": 70.2768248,
+      "momentum_raw": 0.638604916,
+      "fundamental_raw": 0.12585439,
+      "insider_raw": 0.0,
+      "sentiment_raw": 0.0,
+      "pairs_raw": 0.0,
+      "signals_available": 2,
+      "missing_signals": [
+        "insider",
+        "sentiment",
+        "pairs"
+      ]
+    },
+    {
+      "ticker": "FTNT",
+      "rank": 10,
+      "composite": 69.9023458,
+      "momentum_raw": 0.907142101,
+      "fundamental_raw": 0.174925554,
+      "insider_raw": 0.0,
+      "sentiment_raw": 0.0,
+      "pairs_raw": -0.248274512,
+      "signals_available": 3,
+      "missing_signals": [
+        "insider",
+        "sentiment"
+      ]
+    },
+    {
+      "ticker": "TGT",
+      "rank": 11,
+      "composite": 69.4722378,
+      "momentum_raw": 0.76658596,
+      "fundamental_raw": 0.0706611468,
+      "insider_raw": 0.0,
+      "sentiment_raw": 0.0,
+      "pairs_raw": 0.166468366,
+      "signals_available": 3,
+      "missing_signals": [
+        "insider",
+        "sentiment"
+      ]
+    },
+    {
+      "ticker": "NEM",
+      "rank": 12,
+      "composite": 69.4316373,
+      "momentum_raw": 0.462079165,
+      "fundamental_raw": 0.300497043,
+      "insider_raw": 0.0,
+      "sentiment_raw": 0.0,
+      "pairs_raw": 0.0,
+      "signals_available": 2,
+      "missing_signals": [
+        "insider",
+        "sentiment",
+        "pairs"
+      ]
+    },
+    {
+      "ticker": "MRK",
+      "rank": 13,
+      "composite": 69.2588158,
+      "momentum_raw": 0.715651947,
+      "fundamental_raw": -0.0113944402,
+      "insider_raw": 0.0,
+      "sentiment_raw": 0.0,
+      "pairs_raw": 0.0,
+      "signals_available": 2,
+      "missing_signals": [
+        "insider",
+        "sentiment",
+        "pairs"
+      ]
+    },
+    {
+      "ticker": "CF",
+      "rank": 14,
+      "composite": 69.2063546,
+      "momentum_raw": 0.521877807,
+      "fundamental_raw": 0.218826233,
+      "insider_raw": 0.0,
+      "sentiment_raw": 0.0,
+      "pairs_raw": 0.0,
+      "signals_available": 2,
+      "missing_signals": [
+        "insider",
+        "sentiment",
+        "pairs"
+      ]
+    },
+    {
+      "ticker": "CSX",
+      "rank": 15,
+      "composite": 69.0315771,
+      "momentum_raw": 0.627947748,
+      "fundamental_raw": 0.0838520961,
+      "insider_raw": 0.0,
+      "sentiment_raw": 0.0,
+      "pairs_raw": 0.0,
+      "signals_available": 2,
+      "missing_signals": [
+        "insider",
+        "sentiment",
+        "pairs"
+      ]
+    },
+    {
+      "ticker": "PSX",
+      "rank": 16,
+      "composite": 68.4603296,
+      "momentum_raw": 0.727402771,
+      "fundamental_raw": -0.0606288239,
+      "insider_raw": 0.0,
+      "sentiment_raw": 0.0,
+      "pairs_raw": 0.0,
+      "signals_available": 2,
+      "missing_signals": [
+        "insider",
+        "sentiment",
+        "pairs"
+      ]
+    },
+    {
+      "ticker": "STLD",
+      "rank": 17,
+      "composite": 68.1216055,
+      "momentum_raw": 0.649714721,
+      "fundamental_raw": 0.0176929756,
+      "insider_raw": 0.0,
+      "sentiment_raw": 0.0,
+      "pairs_raw": 0.0,
+      "signals_available": 2,
+      "missing_signals": [
+        "insider",
+        "sentiment",
+        "pairs"
+      ]
+    },
+    {
+      "ticker": "EIX",
+      "rank": 18,
+      "composite": 68.00772,
+      "momentum_raw": 0.532214517,
+      "fundamental_raw": 0.239104974,
+      "insider_raw": 0.0,
+      "sentiment_raw": 0.0,
+      "pairs_raw": 0.217783206,
+      "signals_available": 3,
+      "missing_signals": [
+        "insider",
+        "sentiment"
+      ]
+    },
+    {
+      "ticker": "GLW",
+      "rank": 19,
+      "composite": 67.9702715,
+      "momentum_raw": 0.66701266,
+      "fundamental_raw": 0.0983604486,
+      "insider_raw": 0.0,
+      "sentiment_raw": 0.0,
+      "pairs_raw": 0.179265939,
+      "signals_available": 3,
+      "missing_signals": [
+        "insider",
+        "sentiment"
+      ]
+    },
+    {
+      "ticker": "JNJ",
+      "rank": 20,
+      "composite": 67.5934488,
+      "momentum_raw": 0.500622526,
+      "fundamental_raw": 0.173364715,
+      "insider_raw": 0.0,
+      "sentiment_raw": 0.0,
+      "pairs_raw": 0.0,
+      "signals_available": 2,
+      "missing_signals": [
+        "insider",
+        "sentiment",
+        "pairs"
+      ]
+    },
+    {
+      "ticker": "TRV",
+      "rank": 21,
+      "composite": 67.453141,
+      "momentum_raw": 0.540590422,
+      "fundamental_raw": 0.119229696,
+      "insider_raw": 0.0,
+      "sentiment_raw": 0.0,
+      "pairs_raw": 0.0,
+      "signals_available": 2,
+      "missing_signals": [
+        "insider",
+        "sentiment",
+        "pairs"
+      ]
+    },
+    {
+      "ticker": "FLEX",
+      "rank": 22,
+      "composite": 67.2141877,
+      "momentum_raw": 0.769952281,
+      "fundamental_raw": -0.0675077895,
+      "insider_raw": 0.0,
+      "sentiment_raw": 0.0,
+      "pairs_raw": 0.179265939,
+      "signals_available": 3,
+      "missing_signals": [
+        "insider",
+        "sentiment"
+      ]
+    },
+    {
+      "ticker": "TRGP",
+      "rank": 23,
+      "composite": 66.9851907,
+      "momentum_raw": 0.731798127,
+      "fundamental_raw": -0.13080936,
+      "insider_raw": 0.0,
+      "sentiment_raw": 0.0,
+      "pairs_raw": 0.0,
+      "signals_available": 2,
+      "missing_signals": [
+        "insider",
+        "sentiment",
+        "pairs"
+      ]
+    },
+    {
+      "ticker": "NTRS",
+      "rank": 24,
+      "composite": 66.6548921,
+      "momentum_raw": 0.54043756,
+      "fundamental_raw": 0.0842901826,
+      "insider_raw": 0.0,
+      "sentiment_raw": 0.0,
+      "pairs_raw": 0.0,
+      "signals_available": 2,
+      "missing_signals": [
+        "insider",
+        "sentiment",
+        "pairs"
+      ]
+    },
+    {
+      "ticker": "AMGN",
+      "rank": 25,
+      "composite": 66.1583915,
+      "momentum_raw": 0.513763796,
+      "fundamental_raw": 0.0944526689,
+      "insider_raw": 0.0,
+      "sentiment_raw": 0.0,
+      "pairs_raw": 0.0,
+      "signals_available": 2,
+      "missing_signals": [
+        "insider",
+        "sentiment",
+        "pairs"
+      ]
+    },
+    {
+      "ticker": "BIIB",
+      "rank": 26,
+      "composite": 66.1478283,
+      "momentum_raw": 0.492061931,
+      "fundamental_raw": 0.120030129,
+      "insider_raw": 0.0,
+      "sentiment_raw": 0.0,
+      "pairs_raw": 0.0,
+      "signals_available": 2,
+      "missing_signals": [
+        "insider",
+        "sentiment",
+        "pairs"
+      ]
+    },
+    {
+      "ticker": "ALL",
+      "rank": 27,
+      "composite": 66.0967452,
+      "momentum_raw": 0.432093838,
+      "fundamental_raw": 0.189744183,
+      "insider_raw": 0.0,
+      "sentiment_raw": 0.0,
+      "pairs_raw": 0.0,
+      "signals_available": 2,
+      "missing_signals": [
+        "insider",
+        "sentiment",
+        "pairs"
+      ]
+    },
+    {
+      "ticker": "MU",
+      "rank": 28,
+      "composite": 66.0846835,
+      "momentum_raw": 0.687396524,
+      "fundamental_raw": 0.317910837,
+      "insider_raw": 0.0,
+      "sentiment_raw": 0.0,
+      "pairs_raw": -0.403407313,
+      "signals_available": 3,
+      "missing_signals": [
+        "insider",
+        "sentiment"
+      ]
+    },
+    {
+      "ticker": "NUE",
+      "rank": 29,
+      "composite": 65.7247185,
+      "momentum_raw": 0.519589807,
+      "fundamental_raw": 0.0683798477,
+      "insider_raw": 0.0,
+      "sentiment_raw": 0.0,
+      "pairs_raw": 0.0,
+      "signals_available": 2,
+      "missing_signals": [
+        "insider",
+        "sentiment",
+        "pairs"
+      ]
+    },
+    {
+      "ticker": "MS",
+      "rank": 30,
+      "composite": 65.7168569,
+      "momentum_raw": 0.529033107,
+      "fundamental_raw": 0.0567019735,
+      "insider_raw": 0.0,
+      "sentiment_raw": 0.0,
+      "pairs_raw": 0.0,
+      "signals_available": 2,
+      "missing_signals": [
+        "insider",
+        "sentiment",
+        "pairs"
+      ]
+    }
+  ],
+  "ranking": [
+    {
+      "ticker": "ILMN",
+      "composite": 78.1974481,
+      "signals_available": 2
+    },
+    {
+      "ticker": "APA",
+      "composite": 74.9705591,
+      "signals_available": 2
+    },
+    {
+      "ticker": "HWM",
+      "composite": 73.5047126,
+      "signals_available": 2
+    },
+    {
+      "ticker": "VLO",
+      "composite": 72.2966832,
+      "signals_available": 2
+    },
+    {
+      "ticker": "CAT",
+      "composite": 71.8083202,
+      "signals_available": 3
+    },
+    {
+      "ticker": "STT",
+      "composite": 71.7105749,
+      "signals_available": 2
+    },
+    {
+      "ticker": "FIX",
+      "composite": 71.3332998,
+      "signals_available": 3
+    },
+    {
+      "ticker": "MPC",
+      "composite": 70.4003749,
+      "signals_available": 2
+    },
+    {
+      "ticker": "LLY",
+      "composite": 70.2768248,
+      "signals_available": 2
+    },
+    {
+      "ticker": "FTNT",
+      "composite": 69.9023458,
+      "signals_available": 3
+    },
+    {
+      "ticker": "TGT",
+      "composite": 69.4722378,
+      "signals_available": 3
+    },
+    {
+      "ticker": "NEM",
+      "composite": 69.4316373,
+      "signals_available": 2
+    },
+    {
+      "ticker": "MRK",
+      "composite": 69.2588158,
+      "signals_available": 2
+    },
+    {
+      "ticker": "CF",
+      "composite": 69.2063546,
+      "signals_available": 2
+    },
+    {
+      "ticker": "CSX",
+      "composite": 69.0315771,
+      "signals_available": 2
+    },
+    {
+      "ticker": "PSX",
+      "composite": 68.4603296,
+      "signals_available": 2
+    },
+    {
+      "ticker": "STLD",
+      "composite": 68.1216055,
+      "signals_available": 2
+    },
+    {
+      "ticker": "EIX",
+      "composite": 68.00772,
+      "signals_available": 3
+    },
+    {
+      "ticker": "GLW",
+      "composite": 67.9702715,
+      "signals_available": 3
+    },
+    {
+      "ticker": "JNJ",
+      "composite": 67.5934488,
+      "signals_available": 2
+    },
+    {
+      "ticker": "TRV",
+      "composite": 67.453141,
+      "signals_available": 2
+    },
+    {
+      "ticker": "FLEX",
+      "composite": 67.2141877,
+      "signals_available": 3
+    },
+    {
+      "ticker": "TRGP",
+      "composite": 66.9851907,
+      "signals_available": 2
+    },
+    {
+      "ticker": "NTRS",
+      "composite": 66.6548921,
+      "signals_available": 2
+    },
+    {
+      "ticker": "AMGN",
+      "composite": 66.1583915,
+      "signals_available": 2
+    },
+    {
+      "ticker": "BIIB",
+      "composite": 66.1478283,
+      "signals_available": 2
+    },
+    {
+      "ticker": "ALL",
+      "composite": 66.0967452,
+      "signals_available": 2
+    },
+    {
+      "ticker": "MU",
+      "composite": 66.0846835,
+      "signals_available": 3
+    },
+    {
+      "ticker": "NUE",
+      "composite": 65.7247185,
+      "signals_available": 2
+    },
+    {
+      "ticker": "MS",
+      "composite": 65.7168569,
+      "signals_available": 2
+    },
+    {
+      "ticker": "PFG",
+      "composite": 65.6885509,
+      "signals_available": 2
+    },
+    {
+      "ticker": "INCY",
+      "composite": 65.4819689,
+      "signals_available": 2
+    },
+    {
+      "ticker": "DAL",
+      "composite": 65.311676,
+      "signals_available": 2
+    },
+    {
+      "ticker": "CRL",
+      "composite": 65.2111249,
+      "signals_available": 2
+    },
+    {
+      "ticker": "GS",
+      "composite": 65.0677761,
+      "signals_available": 2
+    },
+    {
+      "ticker": "BEN",
+      "composite": 64.9847739,
+      "signals_available": 2
+    },
+    {
+      "ticker": "BMY",
+      "composite": 64.7979838,
+      "signals_available": 2
+    },
+    {
+      "ticker": "IVZ",
+      "composite": 64.6829577,
+      "signals_available": 2
+    },
+    {
+      "ticker": "MNST",
+      "composite": 64.372814,
+      "signals_available": 3
+    },
+    {
+      "ticker": "BNY",
+      "composite": 64.3189012,
+      "signals_available": 3
+    },
+    {
+      "ticker": "WST",
+      "composite": 64.2799293,
+      "signals_available": 3
+    },
+    {
+      "ticker": "GM",
+      "composite": 64.1228019,
+      "signals_available": 2
+    },
+    {
+      "ticker": "PANW",
+      "composite": 63.9247024,
+      "signals_available": 3
+    },
+    {
+      "ticker": "OXY",
+      "composite": 63.7289403,
+      "signals_available": 2
+    },
+    {
+      "ticker": "IBKR",
+      "composite": 63.5977687,
+      "signals_available": 2
+    },
+    {
+      "ticker": "VTRS",
+      "composite": 63.5844578,
+      "signals_available": 2
+    },
+    {
+      "ticker": "WAB",
+      "composite": 63.5770157,
+      "signals_available": 2
+    },
+    {
+      "ticker": "GL",
+      "composite": 63.552756,
+      "signals_available": 2
+    },
+    {
+      "ticker": "GWW",
+      "composite": 63.3906385,
+      "signals_available": 2
+    },
+    {
+      "ticker": "RVTY",
+      "composite": 63.3554869,
+      "signals_available": 2
+    },
+    {
+      "ticker": "UNP",
+      "composite": 63.2867795,
+      "signals_available": 2
+    },
+    {
+      "ticker": "NTAP",
+      "composite": 63.2398037,
+      "signals_available": 3
+    },
+    {
+      "ticker": "PWR",
+      "composite": 63.2260684,
+      "signals_available": 3
+    },
+    {
+      "ticker": "RTX",
+      "composite": 63.1492076,
+      "signals_available": 2
+    },
+    {
+      "ticker": "CRWD",
+      "composite": 63.0200228,
+      "signals_available": 3
+    },
+    {
+      "ticker": "GE",
+      "composite": 62.787391,
+      "signals_available": 2
+    },
+    {
+      "ticker": "COP",
+      "composite": 62.7741154,
+      "signals_available": 2
+    },
+    {
+      "ticker": "ROST",
+      "composite": 62.6514311,
+      "signals_available": 3
+    },
+    {
+      "ticker": "A",
+      "composite": 62.6289626,
+      "signals_available": 2
+    },
+    {
+      "ticker": "TECH",
+      "composite": 62.6245369,
+      "signals_available": 2
+    },
+    {
+      "ticker": "CB",
+      "composite": 62.5964795,
+      "signals_available": 2
+    },
+    {
+      "ticker": "XOM",
+      "composite": 62.5537039,
+      "signals_available": 2
+    },
+    {
+      "ticker": "FANG",
+      "composite": 62.4699872,
+      "signals_available": 2
+    },
+    {
+      "ticker": "DDOG",
+      "composite": 62.4607381,
+      "signals_available": 3
+    },
+    {
+      "ticker": "AIZ",
+      "composite": 62.4516499,
+      "signals_available": 2
+    },
+    {
+      "ticker": "MRVL",
+      "composite": 62.4383404,
+      "signals_available": 3
+    },
+    {
+      "ticker": "REGN",
+      "composite": 62.3104207,
+      "signals_available": 2
+    },
+    {
+      "ticker": "VRTX",
+      "composite": 62.0862162,
+      "signals_available": 2
+    },
+    {
+      "ticker": "APH",
+      "composite": 62.042467,
+      "signals_available": 3
+    },
+    {
+      "ticker": "TMO",
+      "composite": 61.9939878,
+      "signals_available": 2
+    },
+    {
+      "ticker": "DGX",
+      "composite": 61.9927014,
+      "signals_available": 2
+    },
+    {
+      "ticker": "MRNA",
+      "composite": 61.8400805,
+      "signals_available": 2
+    },
+    {
+      "ticker": "VZ",
+      "composite": 61.8326654,
+      "signals_available": 3
+    },
+    {
+      "ticker": "EOG",
+      "composite": 61.6823949,
+      "signals_available": 2
+    },
+    {
+      "ticker": "SCHW",
+      "composite": 61.6346932,
+      "signals_available": 2
+    },
+    {
+      "ticker": "IQV",
+      "composite": 61.3191925,
+      "signals_available": 2
+    },
+    {
+      "ticker": "CFG",
+      "composite": 61.3153887,
+      "signals_available": 3
+    },
+    {
+      "ticker": "SLB",
+      "composite": 61.2921693,
+      "signals_available": 2
+    },
+    {
+      "ticker": "TROW",
+      "composite": 61.1715039,
+      "signals_available": 2
+    },
+    {
+      "ticker": "USB",
+      "composite": 61.1654055,
+      "signals_available": 3
+    },
+    {
+      "ticker": "CASY",
+      "composite": 61.1610038,
+      "signals_available": 3
+    },
+    {
+      "ticker": "AMD",
+      "composite": 60.9840382,
+      "signals_available": 3
+    },
+    {
+      "ticker": "KO",
+      "composite": 60.9391814,
+      "signals_available": 3
+    },
+    {
+      "ticker": "V",
+      "composite": 60.9265022,
+      "signals_available": 3
+    },
+    {
+      "ticker": "DVN",
+      "composite": 60.9087139,
+      "signals_available": 2
+    },
+    {
+      "ticker": "WAT",
+      "composite": 60.8640971,
+      "signals_available": 2
+    },
+    {
+      "ticker": "SOLV",
+      "composite": 60.7273379,
+      "signals_available": 3
+    },
+    {
+      "ticker": "AFL",
+      "composite": 60.6443577,
+      "signals_available": 2
+    },
+    {
+      "ticker": "DLTR",
+      "composite": 60.5919639,
+      "signals_available": 3
+    },
+    {
+      "ticker": "NEE",
+      "composite": 60.4444437,
+      "signals_available": 3
+    },
+    {
+      "ticker": "CINF",
+      "composite": 60.4041079,
+      "signals_available": 2
+    },
+    {
+      "ticker": "DE",
+      "composite": 60.3865873,
+      "signals_available": 3
+    },
+    {
+      "ticker": "MTB",
+      "composite": 60.3002035,
+      "signals_available": 3
+    },
+    {
+      "ticker": "FCX",
+      "composite": 60.2757707,
+      "signals_available": 2
+    },
+    {
+      "ticker": "SJM",
+      "composite": 59.961594,
+      "signals_available": 3
+    },
+    {
+      "ticker": "HAL",
+      "composite": 59.7926172,
+      "signals_available": 2
+    },
+    {
+      "ticker": "CVX",
+      "composite": 59.7679167,
+      "signals_available": 2
+    },
+    {
+      "ticker": "GD",
+      "composite": 59.4142814,
+      "signals_available": 2
+    },
+    {
+      "ticker": "BDX",
+      "composite": 59.3770388,
+      "signals_available": 3
+    },
+    {
+      "ticker": "CBOE",
+      "composite": 59.3080736,
+      "signals_available": 2
+    },
+    {
+      "ticker": "BAC",
+      "composite": 59.3003639,
+      "signals_available": 3
+    },
+    {
+      "ticker": "EVRG",
+      "composite": 59.265078,
+      "signals_available": 3
+    },
+    {
+      "ticker": "D",
+      "composite": 59.1850157,
+      "signals_available": 3
+    },
+    {
+      "ticker": "WSM",
+      "composite": 59.1534831,
+      "signals_available": 3
+    },
+    {
+      "ticker": "PNC",
+      "composite": 59.065619,
+      "signals_available": 3
+    },
+    {
+      "ticker": "DXCM",
+      "composite": 58.9463539,
+      "signals_available": 3
+    },
+    {
+      "ticker": "WBD",
+      "composite": 58.9376358,
+      "signals_available": 3
+    },
+    {
+      "ticker": "ABBV",
+      "composite": 58.7456189,
+      "signals_available": 2
+    },
+    {
+      "ticker": "ACGL",
+      "composite": 58.6681382,
+      "signals_available": 2
+    },
+    {
+      "ticker": "PCAR",
+      "composite": 58.6198534,
+      "signals_available": 3
+    },
+    {
+      "ticker": "OKE",
+      "composite": 58.4385399,
+      "signals_available": 2
+    },
+    {
+      "ticker": "JKHY",
+      "composite": 58.4079421,
+      "signals_available": 3
+    },
+    {
+      "ticker": "CME",
+      "composite": 58.3336242,
+      "signals_available": 2
+    },
+    {
+      "ticker": "INTC",
+      "composite": 58.2701653,
+      "signals_available": 3
+    },
+    {
+      "ticker": "JPM",
+      "composite": 58.2396296,
+      "signals_available": 3
+    },
+    {
+      "ticker": "FAST",
+      "composite": 58.1408527,
+      "signals_available": 2
+    },
+    {
+      "ticker": "LH",
+      "composite": 58.1306826,
+      "signals_available": 2
+    },
+    {
+      "ticker": "ETR",
+      "composite": 58.1116545,
+      "signals_available": 3
+    },
+    {
+      "ticker": "BKR",
+      "composite": 57.6924915,
+      "signals_available": 2
+    },
+    {
+      "ticker": "PLTR",
+      "composite": 57.6212178,
+      "signals_available": 3
+    },
+    {
+      "ticker": "C",
+      "composite": 57.5738381,
+      "signals_available": 3
+    },
+    {
+      "ticker": "JBL",
+      "composite": 57.4478101,
+      "signals_available": 3
+    },
+    {
+      "ticker": "FFIV",
+      "composite": 57.4382308,
+      "signals_available": 3
+    },
+    {
+      "ticker": "CPAY",
+      "composite": 57.4092713,
+      "signals_available": 3
+    },
+    {
+      "ticker": "NSC",
+      "composite": 57.344449,
+      "signals_available": 2
+    },
+    {
+      "ticker": "ODFL",
+      "composite": 57.266314,
+      "signals_available": 2
+    },
+    {
+      "ticker": "AMP",
+      "composite": 57.1052209,
+      "signals_available": 2
+    },
+    {
+      "ticker": "MMM",
+      "composite": 57.0922192,
+      "signals_available": 2
+    },
+    {
+      "ticker": "CHD",
+      "composite": 56.9356355,
+      "signals_available": 3
+    },
+    {
+      "ticker": "PCG",
+      "composite": 56.9350533,
+      "signals_available": 3
+    },
+    {
+      "ticker": "ES",
+      "composite": 56.9119784,
+      "signals_available": 3
+    },
+    {
+      "ticker": "PRU",
+      "composite": 56.8752976,
+      "signals_available": 2
+    },
+    {
+      "ticker": "RF",
+      "composite": 56.872932,
+      "signals_available": 3
+    },
+    {
+      "ticker": "GPC",
+      "composite": 56.7748629,
+      "signals_available": 2
+    },
+    {
+      "ticker": "VRSN",
+      "composite": 56.7729631,
+      "signals_available": 3
+    },
+    {
+      "ticker": "NDAQ",
+      "composite": 56.7687617,
+      "signals_available": 2
+    },
+    {
+      "ticker": "TPR",
+      "composite": 56.7052802,
+      "signals_available": 2
+    },
+    {
+      "ticker": "WMB",
+      "composite": 56.4353053,
+      "signals_available": 2
+    },
+    {
+      "ticker": "AEE",
+      "composite": 56.3898624,
+      "signals_available": 3
+    },
+    {
+      "ticker": "RJF",
+      "composite": 56.2404815,
+      "signals_available": 2
+    },
+    {
+      "ticker": "ED",
+      "composite": 56.1554595,
+      "signals_available": 3
+    },
+    {
+      "ticker": "PNW",
+      "composite": 56.152861,
+      "signals_available": 3
+    },
+    {
+      "ticker": "ADI",
+      "composite": 55.9283875,
+      "signals_available": 3
+    },
+    {
+      "ticker": "EW",
+      "composite": 55.8879198,
+      "signals_available": 3
+    },
+    {
+      "ticker": "AEP",
+      "composite": 55.8384985,
+      "signals_available": 3
+    },
+    {
+      "ticker": "BLK",
+      "composite": 55.8323437,
+      "signals_available": 2
+    },
+    {
+      "ticker": "EME",
+      "composite": 55.787043,
+      "signals_available": 3
+    },
+    {
+      "ticker": "L",
+      "composite": 55.552352,
+      "signals_available": 2
+    },
+    {
+      "ticker": "UAL",
+      "composite": 55.5200063,
+      "signals_available": 2
+    },
+    {
+      "ticker": "TPL",
+      "composite": 55.338368,
+      "signals_available": 2
+    },
+    {
+      "ticker": "KMI",
+      "composite": 55.2556227,
+      "signals_available": 2
+    },
+    {
+      "ticker": "LNT",
+      "composite": 55.2111315,
+      "signals_available": 3
+    },
+    {
+      "ticker": "ATO",
+      "composite": 55.1412011,
+      "signals_available": 3
+    },
+    {
+      "ticker": "TFC",
+      "composite": 54.9972226,
+      "signals_available": 3
+    },
+    {
+      "ticker": "FITB",
+      "composite": 54.970875,
+      "signals_available": 3
+    },
+    {
+      "ticker": "LMT",
+      "composite": 54.9264512,
+      "signals_available": 2
+    },
+    {
+      "ticker": "NVDA",
+      "composite": 54.8975226,
+      "signals_available": 3
+    },
+    {
+      "ticker": "MSFT",
+      "composite": 54.8376046,
+      "signals_available": 3
+    },
+    {
+      "ticker": "SYF",
+      "composite": 54.8223058,
+      "signals_available": 3
+    },
+    {
+      "ticker": "XEL",
+      "composite": 54.8219655,
+      "signals_available": 3
+    },
+    {
+      "ticker": "KHC",
+      "composite": 54.7330804,
+      "signals_available": 3
+    },
+    {
+      "ticker": "PFE",
+      "composite": 54.7099823,
+      "signals_available": 2
+    },
+    {
+      "ticker": "MET",
+      "composite": 54.6985521,
+      "signals_available": 2
+    },
+    {
+      "ticker": "HOOD",
+      "composite": 54.6293892,
+      "signals_available": 2
+    },
+    {
+      "ticker": "HRL",
+      "composite": 54.4973539,
+      "signals_available": 3
+    },
+    {
+      "ticker": "TXN",
+      "composite": 54.4591623,
+      "signals_available": 3
+    },
+    {
+      "ticker": "KEY",
+      "composite": 54.4241495,
+      "signals_available": 3
+    },
+    {
+      "ticker": "AKAM",
+      "composite": 54.3954045,
+      "signals_available": 3
+    },
+    {
+      "ticker": "COO",
+      "composite": 54.2710658,
+      "signals_available": 3
+    },
+    {
+      "ticker": "CL",
+      "composite": 54.1603493,
+      "signals_available": 3
+    },
+    {
+      "ticker": "MSCI",
+      "composite": 53.941704,
+      "signals_available": 2
+    },
+    {
+      "ticker": "T",
+      "composite": 53.8415786,
+      "signals_available": 3
+    },
+    {
+      "ticker": "MPWR",
+      "composite": 53.8091919,
+      "signals_available": 3
+    },
+    {
+      "ticker": "F",
+      "composite": 53.6469366,
+      "signals_available": 2
+    },
+    {
+      "ticker": "DOW",
+      "composite": 53.4745672,
+      "signals_available": 2
+    },
+    {
+      "ticker": "BBY",
+      "composite": 53.4036227,
+      "signals_available": 3
+    },
+    {
+      "ticker": "RSG",
+      "composite": 53.3606449,
+      "signals_available": 3
+    },
+    {
+      "ticker": "ALGN",
+      "composite": 53.2542489,
+      "signals_available": 3
+    },
+    {
+      "ticker": "NWSA",
+      "composite": 53.2184746,
+      "signals_available": 3
+    },
+    {
+      "ticker": "KVUE",
+      "composite": 53.1243705,
+      "signals_available": 3
+    },
+    {
+      "ticker": "PM",
+      "composite": 53.1225678,
+      "signals_available": 3
+    },
+    {
+      "ticker": "DUK",
+      "composite": 53.0664945,
+      "signals_available": 3
+    },
+    {
+      "ticker": "KDP",
+      "composite": 53.0510814,
+      "signals_available": 3
+    },
+    {
+      "ticker": "DG",
+      "composite": 52.9651784,
+      "signals_available": 3
+    },
+    {
+      "ticker": "NWS",
+      "composite": 52.9201443,
+      "signals_available": 3
+    },
+    {
+      "ticker": "WM",
+      "composite": 52.8968656,
+      "signals_available": 3
+    },
+    {
+      "ticker": "CTVA",
+      "composite": 52.7882487,
+      "signals_available": 2
+    },
+    {
+      "ticker": "WEC",
+      "composite": 52.7540089,
+      "signals_available": 3
+    },
+    {
+      "ticker": "DHR",
+      "composite": 52.7448146,
+      "signals_available": 2
+    },
+    {
+      "ticker": "MDT",
+      "composite": 52.7385868,
+      "signals_available": 3
+    },
+    {
+      "ticker": "HIG",
+      "composite": 52.7272307,
+      "signals_available": 2
+    },
+    {
+      "ticker": "PG",
+      "composite": 52.6918691,
+      "signals_available": 3
+    },
+    {
+      "ticker": "AWK",
+      "composite": 52.5861699,
+      "signals_available": 3
+    },
+    {
+      "ticker": "MTD",
+      "composite": 52.2373088,
+      "signals_available": 2
+    },
+    {
+      "ticker": "MA",
+      "composite": 52.1826457,
+      "signals_available": 3
+    },
+    {
+      "ticker": "ZBH",
+      "composite": 52.050305,
+      "signals_available": 3
+    },
+    {
+      "ticker": "PAYX",
+      "composite": 51.9212321,
+      "signals_available": 3
+    },
+    {
+      "ticker": "J",
+      "composite": 51.8986195,
+      "signals_available": 3
+    },
+    {
+      "ticker": "EXC",
+      "composite": 51.7810089,
+      "signals_available": 3
+    },
+    {
+      "ticker": "FE",
+      "composite": 51.7745658,
+      "signals_available": 3
+    },
+    {
+      "ticker": "TEL",
+      "composite": 51.6882253,
+      "signals_available": 3
+    },
+    {
+      "ticker": "ADP",
+      "composite": 51.5270317,
+      "signals_available": 3
+    },
+    {
+      "ticker": "RL",
+      "composite": 51.4304272,
+      "signals_available": 2
+    },
+    {
+      "ticker": "LUV",
+      "composite": 51.3833494,
+      "signals_available": 2
+    },
+    {
+      "ticker": "HON",
+      "composite": 51.3423041,
+      "signals_available": 2
+    },
+    {
+      "ticker": "GEN",
+      "composite": 51.3376674,
+      "signals_available": 3
+    },
+    {
+      "ticker": "ON",
+      "composite": 51.2638841,
+      "signals_available": 3
+    },
+    {
+      "ticker": "XYZ",
+      "composite": 51.1925349,
+      "signals_available": 3
+    },
+    {
+      "ticker": "CNP",
+      "composite": 51.1715187,
+      "signals_available": 3
+    },
+    {
+      "ticker": "CMCSA",
+      "composite": 51.1370216,
+      "signals_available": 3
+    },
+    {
+      "ticker": "BAX",
+      "composite": 51.1155768,
+      "signals_available": 3
+    },
+    {
+      "ticker": "ECHO",
+      "composite": 51.0657768,
+      "signals_available": 3
+    },
+    {
+      "ticker": "FDS",
+      "composite": 50.9792508,
+      "signals_available": 2
+    },
+    {
+      "ticker": "GILD",
+      "composite": 50.7990777,
+      "signals_available": 2
+    },
+    {
+      "ticker": "SO",
+      "composite": 50.7111651,
+      "signals_available": 3
+    },
+    {
+      "ticker": "AVGO",
+      "composite": 50.5616153,
+      "signals_available": 3
+    },
+    {
+      "ticker": "MCO",
+      "composite": 50.5383095,
+      "signals_available": 2
+    },
+    {
+      "ticker": "STE",
+      "composite": 50.4700682,
+      "signals_available": 3
+    },
+    {
+      "ticker": "EL",
+      "composite": 50.4222715,
+      "signals_available": 3
+    },
+    {
+      "ticker": "ICE",
+      "composite": 50.3881285,
+      "signals_available": 2
+    },
+    {
+      "ticker": "RMD",
+      "composite": 50.3501556,
+      "signals_available": 3
+    },
+    {
+      "ticker": "MO",
+      "composite": 50.3297442,
+      "signals_available": 3
+    },
+    {
+      "ticker": "FOXA",
+      "composite": 50.310556,
+      "signals_available": 3
+    },
+    {
+      "ticker": "ORLY",
+      "composite": 50.3033867,
+      "signals_available": 2
+    },
+    {
+      "ticker": "AXP",
+      "composite": 50.0336792,
+      "signals_available": 3
+    },
+    {
+      "ticker": "EQT",
+      "composite": 50.0179824,
+      "signals_available": 2
+    },
+    {
+      "ticker": "KMB",
+      "composite": 49.9908672,
+      "signals_available": 3
+    },
+    {
+      "ticker": "AES",
+      "composite": 49.8060708,
+      "signals_available": 3
+    },
+    {
+      "ticker": "FOX",
+      "composite": 49.7159349,
+      "signals_available": 3
+    },
+    {
+      "ticker": "IBM",
+      "composite": 49.4275706,
+      "signals_available": 3
+    },
+    {
+      "ticker": "WFC",
+      "composite": 49.3642255,
+      "signals_available": 3
+    },
+    {
+      "ticker": "ABT",
+      "composite": 49.292561,
+      "signals_available": 3
+    },
+    {
+      "ticker": "TDG",
+      "composite": 49.2239186,
+      "signals_available": 2
+    },
+    {
+      "ticker": "GEHC",
+      "composite": 49.1601814,
+      "signals_available": 3
+    },
+    {
+      "ticker": "COF",
+      "composite": 49.1226842,
+      "signals_available": 3
+    },
+    {
+      "ticker": "PPL",
+      "composite": 48.9343714,
+      "signals_available": 3
+    },
+    {
+      "ticker": "LYV",
+      "composite": 48.9192897,
+      "signals_available": 3
+    },
+    {
+      "ticker": "SRE",
+      "composite": 48.8290965,
+      "signals_available": 3
+    },
+    {
+      "ticker": "DTE",
+      "composite": 48.7921893,
+      "signals_available": 3
+    },
+    {
+      "ticker": "WDAY",
+      "composite": 48.7550441,
+      "signals_available": 3
+    },
+    {
+      "ticker": "CDW",
+      "composite": 48.7493481,
+      "signals_available": 3
+    },
+    {
+      "ticker": "PYPL",
+      "composite": 48.5886977,
+      "signals_available": 3
+    },
+    {
+      "ticker": "SPGI",
+      "composite": 48.533816,
+      "signals_available": 2
+    },
+    {
+      "ticker": "ROP",
+      "composite": 48.4944985,
+      "signals_available": 3
+    },
+    {
+      "ticker": "AXON",
+      "composite": 48.4247405,
+      "signals_available": 2
+    },
+    {
+      "ticker": "VMC",
+      "composite": 48.3716522,
+      "signals_available": 2
+    },
+    {
+      "ticker": "COST",
+      "composite": 48.165498,
+      "signals_available": 3
+    },
+    {
+      "ticker": "TXT",
+      "composite": 48.0939423,
+      "signals_available": 2
+    },
+    {
+      "ticker": "CTSH",
+      "composite": 48.0849969,
+      "signals_available": 3
+    },
+    {
+      "ticker": "CMS",
+      "composite": 48.0737053,
+      "signals_available": 3
+    },
+    {
+      "ticker": "SWKS",
+      "composite": 48.0460325,
+      "signals_available": 3
+    },
+    {
+      "ticker": "BX",
+      "composite": 48.0012057,
+      "signals_available": 2
+    },
+    {
+      "ticker": "MKC",
+      "composite": 47.8894078,
+      "signals_available": 3
+    },
+    {
+      "ticker": "WRB",
+      "composite": 47.8273057,
+      "signals_available": 2
+    },
+    {
+      "ticker": "FERG",
+      "composite": 47.6557045,
+      "signals_available": 2
+    },
+    {
+      "ticker": "AIG",
+      "composite": 47.5306702,
+      "signals_available": 2
+    },
+    {
+      "ticker": "HBAN",
+      "composite": 47.4715556,
+      "signals_available": 3
+    },
+    {
+      "ticker": "EXE",
+      "composite": 47.4660458,
+      "signals_available": 2
+    },
+    {
+      "ticker": "CDNS",
+      "composite": 47.3429533,
+      "signals_available": 3
+    },
+    {
+      "ticker": "WMT",
+      "composite": 47.3297,
+      "signals_available": 3
+    },
+    {
+      "ticker": "IT",
+      "composite": 47.1514123,
+      "signals_available": 3
+    },
+    {
+      "ticker": "DIS",
+      "composite": 46.8778073,
+      "signals_available": 3
+    },
+    {
+      "ticker": "MCHP",
+      "composite": 46.8567986,
+      "signals_available": 3
+    },
+    {
+      "ticker": "TKO",
+      "composite": 46.6280358,
+      "signals_available": 3
+    },
+    {
+      "ticker": "APO",
+      "composite": 46.6183503,
+      "signals_available": 2
+    },
+    {
+      "ticker": "PEG",
+      "composite": 46.6151451,
+      "signals_available": 3
+    },
+    {
+      "ticker": "QCOM",
+      "composite": 46.6146536,
+      "signals_available": 3
+    },
+    {
+      "ticker": "HII",
+      "composite": 46.4654523,
+      "signals_available": 2
+    },
+    {
+      "ticker": "CRM",
+      "composite": 46.3618138,
+      "signals_available": 3
+    },
+    {
+      "ticker": "SYK",
+      "composite": 46.3214782,
+      "signals_available": 3
+    },
+    {
+      "ticker": "TMUS",
+      "composite": 46.2981597,
+      "signals_available": 3
+    },
+    {
+      "ticker": "NI",
+      "composite": 46.1901535,
+      "signals_available": 3
+    },
+    {
+      "ticker": "TJX",
+      "composite": 46.1253185,
+      "signals_available": 3
+    },
+    {
+      "ticker": "MLM",
+      "composite": 45.9730061,
+      "signals_available": 2
+    },
+    {
+      "ticker": "CLX",
+      "composite": 45.7949124,
+      "signals_available": 3
+    },
+    {
+      "ticker": "ULTA",
+      "composite": 45.6687758,
+      "signals_available": 3
+    },
+    {
+      "ticker": "TSLA",
+      "composite": 45.4666958,
+      "signals_available": 2
+    },
+    {
+      "ticker": "PTC",
+      "composite": 45.3042442,
+      "signals_available": 3
+    },
+    {
+      "ticker": "IDXX",
+      "composite": 45.1071358,
+      "signals_available": 2
+    },
+    {
+      "ticker": "FIS",
+      "composite": 45.0606805,
+      "signals_available": 3
+    },
+    {
+      "ticker": "ISRG",
+      "composite": 44.7338193,
+      "signals_available": 3
+    },
+    {
+      "ticker": "NXPI",
+      "composite": 44.6372136,
+      "signals_available": 3
+    },
+    {
+      "ticker": "BR",
+      "composite": 44.6027353,
+      "signals_available": 3
+    },
+    {
+      "ticker": "ADBE",
+      "composite": 44.5448915,
+      "signals_available": 3
+    },
+    {
+      "ticker": "LHX",
+      "composite": 44.499346,
+      "signals_available": 2
+    },
+    {
+      "ticker": "PGR",
+      "composite": 44.2834251,
+      "signals_available": 2
+    },
+    {
+      "ticker": "NOC",
+      "composite": 44.176217,
+      "signals_available": 2
+    },
+    {
+      "ticker": "NOW",
+      "composite": 44.0863127,
+      "signals_available": 3
+    },
+    {
+      "ticker": "GIS",
+      "composite": 44.0273071,
+      "signals_available": 3
+    },
+    {
+      "ticker": "UBER",
+      "composite": 43.9167101,
+      "signals_available": 3
+    },
+    {
+      "ticker": "CHTR",
+      "composite": 43.7480188,
+      "signals_available": 3
+    },
+    {
+      "ticker": "STZ",
+      "composite": 43.6518709,
+      "signals_available": 3
+    },
+    {
+      "ticker": "HONA",
+      "composite": 43.4924305,
+      "signals_available": 2
+    },
+    {
+      "ticker": "ACN",
+      "composite": 43.128544,
+      "signals_available": 3
+    },
+    {
+      "ticker": "PEP",
+      "composite": 43.1035068,
+      "signals_available": 3
+    },
+    {
+      "ticker": "KKR",
+      "composite": 43.0258551,
+      "signals_available": 2
+    },
+    {
+      "ticker": "ARES",
+      "composite": 42.8159539,
+      "signals_available": 2
+    },
+    {
+      "ticker": "NFLX",
+      "composite": 42.4374359,
+      "signals_available": 3
+    },
+    {
+      "ticker": "LDOS",
+      "composite": 42.4278129,
+      "signals_available": 3
+    },
+    {
+      "ticker": "ADSK",
+      "composite": 42.3806123,
+      "signals_available": 3
+    },
+    {
+      "ticker": "LULU",
+      "composite": 41.4037544,
+      "signals_available": 3
+    },
+    {
+      "ticker": "FICO",
+      "composite": 41.3837554,
+      "signals_available": 3
+    },
+    {
+      "ticker": "AZO",
+      "composite": 40.8670457,
+      "signals_available": 2
+    },
+    {
+      "ticker": "CRH",
+      "composite": 40.6767197,
+      "signals_available": 2
+    },
+    {
+      "ticker": "MOS",
+      "composite": 39.4727168,
+      "signals_available": 2
+    },
+    {
+      "ticker": "GDDY",
+      "composite": 39.4583475,
+      "signals_available": 3
+    },
+    {
+      "ticker": "TYL",
+      "composite": 39.2136697,
+      "signals_available": 3
+    },
+    {
+      "ticker": "BA",
+      "composite": 38.2979854,
+      "signals_available": 2
+    },
+    {
+      "ticker": "ORCL",
+      "composite": 38.2941228,
+      "signals_available": 3
+    },
+    {
+      "ticker": "BSX",
+      "composite": 37.9090732,
+      "signals_available": 3
+    },
+    {
+      "ticker": "SNPS",
+      "composite": 37.6034439,
+      "signals_available": 3
+    },
+    {
+      "ticker": "INTU",
+      "composite": 37.3023718,
+      "signals_available": 3
+    },
+    {
+      "ticker": "TSCO",
+      "composite": 36.1878981,
+      "signals_available": 3
+    },
+    {
+      "ticker": "PSKY",
+      "composite": 36.0978616,
+      "signals_available": 3
+    },
+    {
+      "ticker": "APTV",
+      "composite": 35.1867759,
+      "signals_available": 2
+    },
+    {
+      "ticker": "PODD",
+      "composite": 34.6217667,
+      "signals_available": 3
+    },
+    {
+      "ticker": "ZTS",
+      "composite": 34.0275792,
+      "signals_available": 2
+    },
+    {
+      "ticker": "COIN",
+      "composite": 27.0330069,
+      "signals_available": 2
+    }
+  ],
+  "prev_hash": "a78df9da65070765a565c5b8b23a1e2f02377a74d6c83f7c280ce864c9bd6d8a",
+  "hash": "35a173b7c7cbd64f25c517a39cc22a5eb40c96ad3a157329b21b686f1bf00d71"
+}
